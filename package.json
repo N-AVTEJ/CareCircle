@@ -19,7 +19,8 @@
     "prisma:seed": "npm run prisma:seed --workspace=backend",
     "prisma:studio": "npm run prisma:studio --workspace=backend",
     "verify:checkin": "npm run verify:checkin --workspace=backend",
-    "verify:dashboard": "npm run verify:dashboard --workspace=backend"
+    "verify:dashboard": "npm run verify:dashboard --workspace=backend",
+    "verify:alert": "npm run verify:alert --workspace=backend"
   },
   "prisma": {
     "schema": "backend/prisma/schema.prisma"
