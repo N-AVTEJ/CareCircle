@@ -45,9 +45,17 @@ io.on('connection', (socket) => {
     if (targetRoom) socket.join(String(targetRoom))
   }
 
+  const handleLeave = (room) => {
+    if (!room) return
+    const targetRoom = typeof room === 'object' ? (room.familyGroupId || room.room || room.id) : room
+    if (targetRoom) socket.leave(String(targetRoom))
+  }
+
   socket.on('join', handleJoin)
   socket.on('join:family', handleJoin)
   socket.on('join_room', handleJoin)
+  socket.on('leave', handleLeave)
+  socket.on('leave:family', handleLeave)
 })
 
 // Health check endpoint
@@ -93,8 +101,30 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
     }
 
     const trimmedGroupId = familyGroupId.trim()
-    const limit = req.query.limit ? Math.min(parseInt(req.query.limit, 10) || 20, 100) : 20
-    const thresholdHours = req.query.thresholdHours ? parseFloat(req.query.thresholdHours) : 24
+
+    let limit = 20
+    if (req.query.limit !== undefined) {
+      const parsedLimit = parseInt(req.query.limit, 10)
+      if (isNaN(parsedLimit) || parsedLimit <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'limit query parameter must be a positive integer',
+        })
+      }
+      limit = Math.min(parsedLimit, 100)
+    }
+
+    let thresholdHours = 24
+    if (req.query.thresholdHours !== undefined) {
+      const parsedHours = parseFloat(req.query.thresholdHours)
+      if (isNaN(parsedHours) || parsedHours <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'thresholdHours query parameter must be a positive number',
+        })
+      }
+      thresholdHours = parsedHours
+    }
 
     // 1. Fetch all seniors in this family group
     const seniors = await prisma.user.findMany({
@@ -104,12 +134,12 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
       },
       include: {
         checkIns: {
-          orderBy: { timestamp: 'desc' },
+          orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
           take: 5,
         },
         alerts: {
           where: { status: 'ACTIVE' },
-          orderBy: { timestamp: 'desc' },
+          orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
         },
       },
       orderBy: { name: 'asc' },
@@ -122,7 +152,7 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
           familyGroupId: trimmedGroupId,
         },
       },
-      orderBy: { timestamp: 'desc' },
+      orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
       take: limit,
       include: {
         user: {
@@ -165,6 +195,9 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
     })
 
     const primarySenior = seniorStatuses[0] || null
+    const hasAnyRed = seniorStatuses.some((s) => s.status === 'RED')
+    const overallStatus = seniorStatuses.length === 0 ? 'NONE' : hasAnyRed ? 'RED' : 'GREEN'
+    const overallStatusColor = seniorStatuses.length === 0 ? 'gray' : hasAnyRed ? 'red' : 'green'
 
     res.json({
       success: true,
@@ -175,13 +208,13 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
         senior: primarySenior,
         latestCheckIn: primarySenior?.latestCheckIn || null,
         lastCheckInTime: primarySenior?.lastCheckInTime || null,
-        status: primarySenior?.status || (seniorStatuses.length > 0 ? 'RED' : 'NONE'),
-        statusColor: primarySenior?.statusColor || (seniorStatuses.length > 0 ? 'red' : 'gray'),
+        status: overallStatus,
+        statusColor: overallStatusColor,
       },
       seniors: seniorStatuses,
       recentCheckIns,
       latestCheckIn: primarySenior?.latestCheckIn || null,
-      status: primarySenior?.status || (seniorStatuses.length > 0 ? 'RED' : 'NONE'),
+      status: overallStatus,
     })
   } catch (error) {
     console.error('Error fetching dashboard:', error)

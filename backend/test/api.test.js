@@ -615,4 +615,103 @@ test('GET /api/dashboard/:familyGroupId returns empty list for unknown family gr
   assert.equal(json.data.recentCheckIns.length, 0)
 })
 
+test('GET /api/dashboard/:familyGroupId rejects non-positive or invalid ?limit= with 400', async () => {
+  const resZero = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?limit=0`)
+  assert.equal(resZero.status, 400)
+  const jsonZero = await resZero.json()
+  assert.equal(jsonZero.success, false)
+
+  const resNeg = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?limit=-5`)
+  assert.equal(resNeg.status, 400)
+  const jsonNeg = await resNeg.json()
+  assert.equal(jsonNeg.success, false)
+
+  const resInvalid = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?limit=abc`)
+  assert.equal(resInvalid.status, 400)
+  const jsonInvalid = await resInvalid.json()
+  assert.equal(jsonInvalid.success, false)
+})
+
+test('GET /api/dashboard/:familyGroupId rejects non-positive or invalid ?thresholdHours= with 400', async () => {
+  const resZero = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?thresholdHours=0`)
+  assert.equal(resZero.status, 400)
+  const jsonZero = await resZero.json()
+  assert.equal(jsonZero.success, false)
+
+  const resNeg = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?thresholdHours=-2`)
+  assert.equal(resNeg.status, 400)
+  const jsonNeg = await resNeg.json()
+  assert.equal(jsonNeg.success, false)
+
+  const resInvalid = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?thresholdHours=notanumber`)
+  assert.equal(resInvalid.status, 400)
+  const jsonInvalid = await resInvalid.json()
+  assert.equal(jsonInvalid.success, false)
+})
+
+test('GET /api/dashboard/:familyGroupId computes status accurately for multiple seniors in same group', async () => {
+  const multiGroupId = `multi_senior_group_${Date.now()}`
+
+  // Senior 1: has checked in recently (GREEN)
+  const senior1 = await prisma.user.create({
+    data: {
+      name: 'Alice Active',
+      role: 'SENIOR',
+      phone: '+1-555-1001',
+      familyGroupId: multiGroupId,
+    },
+  })
+  await prisma.checkIn.create({
+    data: {
+      userId: senior1.id,
+      type: 'MEAL',
+      status: 'Ate lunch 30 minutes ago',
+      timestamp: new Date(),
+    },
+  })
+
+  // Senior 2: has overdue check-in from 4 days ago (RED)
+  const senior2 = await prisma.user.create({
+    data: {
+      name: 'Bob Overdue',
+      role: 'SENIOR',
+      phone: '+1-555-1002',
+      familyGroupId: multiGroupId,
+    },
+  })
+  await prisma.checkIn.create({
+    data: {
+      userId: senior2.id,
+      type: 'PILLS',
+      status: 'Took pills 4 days ago',
+      timestamp: new Date(Date.now() - 96 * 60 * 60 * 1000),
+    },
+  })
+
+  try {
+    const res = await fetch(`${baseUrl}/api/dashboard/${multiGroupId}`)
+    assert.equal(res.status, 200)
+    const json = await res.json()
+    assert.equal(json.success, true)
+    assert.equal(json.data.seniors.length, 2)
+
+    const s1 = json.data.seniors.find((s) => s.id === senior1.id)
+    const s2 = json.data.seniors.find((s) => s.id === senior2.id)
+
+    assert.ok(s1 && s2, 'Both seniors must be returned in the dashboard response')
+    assert.equal(s1.status, 'GREEN', 'Senior 1 with fresh check-in must be GREEN')
+    assert.equal(s1.statusColor, 'green')
+    assert.equal(s2.status, 'RED', 'Senior 2 with 4-day-old check-in must be RED')
+    assert.equal(s2.statusColor, 'red')
+
+    // Since Senior 2 is RED, the family circle overall status must be RED to warn caregivers
+    assert.equal(json.data.status, 'RED')
+    assert.equal(json.data.statusColor, 'red')
+  } finally {
+    await prisma.checkIn.deleteMany({ where: { userId: { in: [senior1.id, senior2.id] } } })
+    await prisma.user.deleteMany({ where: { id: { in: [senior1.id, senior2.id] } } })
+  }
+})
+
+
 
