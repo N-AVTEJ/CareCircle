@@ -28,6 +28,14 @@ function getRelativeTime(timestamp) {
   return `${Math.floor(diffHours / 24)}d ago`
 }
 
+function getInitials(name, fallback = 'CC') {
+  if (!name) return fallback
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return fallback
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+}
+
 export default function App() {
   const [activeView, setActiveView] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -37,6 +45,32 @@ export default function App() {
     }
     return 'SENIOR'
   })
+
+  const [activeFamilyGroupId] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search)
+      const g = p.get('familyGroupId')?.trim()
+      if (g) return g
+    }
+    return DEFAULT_FAMILY_GROUP_ID
+  })
+
+  const [nowTimestamp, setNowTimestamp] = useState(() => Date.now())
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowTimestamp(Date.now()), 30000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const [selectedSeniorId, setSelectedSeniorId] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search)
+      const s = p.get('seniorId') || p.get('userId')
+      if (s) return s.trim()
+    }
+    return HARDCODED_SENIOR_USER_ID
+  })
+
   const [users, setUsers] = useState([])
   const [dashboardSeniors, setDashboardSeniors] = useState([])
   const [checkIns, setCheckIns] = useState([])
@@ -54,6 +88,7 @@ export default function App() {
   // Family dashboard form states
   const [customCheckInType, setCustomCheckInType] = useState('PILLS')
   const [customCheckInStatus, setCustomCheckInStatus] = useState('Morning medication taken')
+  const [customSeniorId, setCustomSeniorId] = useState('')
   const [submittingCustomCheckIn, setSubmittingCustomCheckIn] = useState(false)
   const [submittingAlert, setSubmittingAlert] = useState(false)
 
@@ -69,10 +104,10 @@ export default function App() {
   const loadData = useCallback(async () => {
     try {
       const [dashRes, uRes, aRes] = await Promise.all([
-        fetch(`${API_BASE}/api/dashboard/${DEFAULT_FAMILY_GROUP_ID}`).then((r) =>
+        fetch(`${API_BASE}/api/dashboard/${activeFamilyGroupId}`).then((r) =>
           r.ok ? r.json() : null
         ),
-        fetch(`${API_BASE}/api/users?familyGroupId=${DEFAULT_FAMILY_GROUP_ID}`).then((r) =>
+        fetch(`${API_BASE}/api/users?familyGroupId=${activeFamilyGroupId}`).then((r) =>
           r.ok ? r.json() : null
         ),
         fetch(`${API_BASE}/api/alerts`).then((r) => (r.ok ? r.json() : null)),
@@ -97,7 +132,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [activeFamilyGroupId])
 
   // Initial load
   useEffect(() => {
@@ -116,15 +151,16 @@ export default function App() {
   // Real-time Socket.io listener
   useEffect(() => {
     const socket = io('/', {
-      query: { familyGroupId: DEFAULT_FAMILY_GROUP_ID },
-      auth: { familyGroupId: DEFAULT_FAMILY_GROUP_ID },
+      query: { familyGroupId: activeFamilyGroupId },
+      auth: { familyGroupId: activeFamilyGroupId },
       transports: ['websocket', 'polling'],
     })
 
     socket.on('connect', () => {
       setSocketConnected(true)
-      socket.emit('join:family', DEFAULT_FAMILY_GROUP_ID)
-      socket.emit('join', DEFAULT_FAMILY_GROUP_ID)
+      socket.emit('join:family', activeFamilyGroupId)
+      socket.emit('join', activeFamilyGroupId)
+      loadData()
     })
 
     socket.on('disconnect', () => {
@@ -132,32 +168,48 @@ export default function App() {
     })
 
     socket.on('checkin:new', (newCheckIn) => {
+      // Ignore check-ins for different family groups
+      if (
+        newCheckIn.user?.familyGroupId &&
+        newCheckIn.user.familyGroupId !== activeFamilyGroupId
+      ) {
+        return
+      }
+
       // 1. Live list of check-ins (prepend new check-in without page refresh)
       setCheckIns((prev) => {
         if (prev.some((c) => c.id === newCheckIn.id)) return prev
         return [newCheckIn, ...prev]
       })
 
-      // 2. Status card (update senior status to GREEN and update last check-in time immediately)
+      // 2. Status card (update only the matching senior's status to GREEN)
       setDashboardSeniors((prevSeniors) => {
-        if (!prevSeniors || prevSeniors.length === 0) {
+        const targetId = newCheckIn.userId
+        const seniorExists = prevSeniors.some((s) => s.id === targetId)
+
+        if (!seniorExists && newCheckIn.user?.role === 'SENIOR') {
           return [
+            ...prevSeniors,
             {
-              id: newCheckIn.userId,
-              name: newCheckIn.user?.name || 'Eleanor Vance',
+              id: targetId,
+              name: newCheckIn.user?.name || 'Senior Member',
               role: 'SENIOR',
               phone: newCheckIn.user?.phone || '+1-555-0143',
-              familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+              familyGroupId: newCheckIn.user?.familyGroupId || activeFamilyGroupId,
               status: 'GREEN',
               statusColor: 'green',
               latestCheckIn: newCheckIn,
               lastCheckInTime: newCheckIn.timestamp,
               isCheckedInRecently: true,
+              activeAlerts: [],
+              hasActiveAlerts: false,
+              recentCheckIns: [newCheckIn],
             },
           ]
         }
+
         return prevSeniors.map((senior) => {
-          if (senior.id === newCheckIn.userId || senior.id === HARDCODED_SENIOR_USER_ID) {
+          if (senior.id === targetId) {
             return {
               ...senior,
               status: 'GREEN',
@@ -165,6 +217,7 @@ export default function App() {
               latestCheckIn: newCheckIn,
               lastCheckInTime: newCheckIn.timestamp,
               isCheckedInRecently: true,
+              recentCheckIns: [newCheckIn, ...(senior.recentCheckIns || [])].slice(0, 5),
             }
           }
           return senior
@@ -176,6 +229,7 @@ export default function App() {
         id: newCheckIn.id,
         type: newCheckIn.type,
         status: newCheckIn.status,
+        seniorName: newCheckIn.user?.name || 'Senior',
         timestamp: newCheckIn.timestamp || new Date().toISOString(),
       })
     })
@@ -183,7 +237,7 @@ export default function App() {
     return () => {
       socket.disconnect()
     }
-  }, [])
+  }, [activeFamilyGroupId, loadData])
 
   // Auto-dismiss feedback toast after 6 seconds
   useEffect(() => {
@@ -205,14 +259,18 @@ export default function App() {
 
   // Resolved user models (using seeded data or fallback)
   const seniorFromDashboard =
-    dashboardSeniors.find((s) => s.id === HARDCODED_SENIOR_USER_ID) || dashboardSeniors[0]
-  const seniorFromUsers = users.find((u) => u.role === 'SENIOR')
+    dashboardSeniors.find((s) => s.id === selectedSeniorId) ||
+    dashboardSeniors.find((s) => s.id === HARDCODED_SENIOR_USER_ID) ||
+    dashboardSeniors[0]
+  const seniorFromUsers =
+    users.find((u) => u.id === selectedSeniorId && u.role === 'SENIOR') ||
+    users.find((u) => u.role === 'SENIOR')
   const seniorUser = seniorFromDashboard || seniorFromUsers || {
-    id: HARDCODED_SENIOR_USER_ID,
+    id: selectedSeniorId || HARDCODED_SENIOR_USER_ID,
     name: 'Eleanor Vance',
     role: 'SENIOR',
     phone: '+1-555-0143',
-    familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+    familyGroupId: activeFamilyGroupId,
     status: 'RED',
     statusColor: 'red',
   }
@@ -222,7 +280,7 @@ export default function App() {
     name: 'David Vance',
     role: 'FAMILY',
     phone: '+1-555-0198',
-    familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+    familyGroupId: activeFamilyGroupId,
   }
 
   // 1-Tap Senior Check-In action
@@ -265,7 +323,7 @@ export default function App() {
                   name: json.data.user?.name || seniorUser.name,
                   role: 'SENIOR',
                   phone: seniorUser.phone,
-                  familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+                  familyGroupId: activeFamilyGroupId,
                   status: 'GREEN',
                   statusColor: 'green',
                   latestCheckIn: json.data,
@@ -275,7 +333,7 @@ export default function App() {
               ]
             }
             return prev.map((s) =>
-              s.id === seniorId || s.id === HARDCODED_SENIOR_USER_ID
+              s.id === seniorId
                 ? {
                     ...s,
                     status: 'GREEN',
@@ -283,6 +341,7 @@ export default function App() {
                     latestCheckIn: json.data,
                     lastCheckInTime: json.data.timestamp,
                     isCheckedInRecently: true,
+                    recentCheckIns: [json.data, ...(s.recentCheckIns || [])].slice(0, 5),
                   }
                 : s
             )
@@ -304,6 +363,7 @@ export default function App() {
     e.preventDefault()
     if (!customCheckInStatus.trim()) return
 
+    const targetSeniorId = customSeniorId || seniorUser.id || HARDCODED_SENIOR_USER_ID
     setSubmittingCustomCheckIn(true)
     setErrorMsg(null)
     try {
@@ -311,7 +371,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: seniorUser.id || HARDCODED_SENIOR_USER_ID,
+          userId: targetSeniorId,
           type: customCheckInType,
           status: customCheckInStatus.trim(),
         }),
@@ -325,7 +385,7 @@ export default function App() {
           })
           setDashboardSeniors((prev) =>
             prev.map((s) =>
-              s.id === seniorUser.id || s.id === HARDCODED_SENIOR_USER_ID
+              s.id === targetSeniorId
                 ? {
                     ...s,
                     status: 'GREEN',
@@ -333,6 +393,7 @@ export default function App() {
                     latestCheckIn: json.data,
                     lastCheckInTime: json.data.timestamp,
                     isCheckedInRecently: true,
+                    recentCheckIns: [json.data, ...(s.recentCheckIns || [])].slice(0, 5),
                   }
                 : s
             )
@@ -409,15 +470,19 @@ export default function App() {
     }
   }
 
-  const seniorCheckIns = checkIns.filter(
-    (c) => c.userId === seniorUser.id || c.userId === HARDCODED_SENIOR_USER_ID
-  )
+  const seniorCheckIns = checkIns.filter((c) => c.userId === seniorUser.id)
 
   const getLastCheckInTime = (type) => {
     const item = seniorCheckIns.find((c) => c.type === type)
     if (!item) return null
     const date = new Date(item.timestamp)
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  }
+
+  const isRecentlyCheckedIn = (ts) => {
+    if (!ts) return false
+    const t = new Date(ts).getTime()
+    return !isNaN(t) && nowTimestamp - t <= 24 * 60 * 60 * 1000
   }
 
   const effectiveSeniors =
@@ -428,9 +493,9 @@ export default function App() {
             ...seniorUser,
             latestCheckIn: seniorCheckIns[0] || null,
             lastCheckInTime: seniorCheckIns[0]?.timestamp || null,
-            status: seniorCheckIns.length > 0 ? 'GREEN' : 'RED',
-            statusColor: seniorCheckIns.length > 0 ? 'green' : 'red',
-            isCheckedInRecently: seniorCheckIns.length > 0,
+            status: isRecentlyCheckedIn(seniorCheckIns[0]?.timestamp) ? 'GREEN' : 'RED',
+            statusColor: isRecentlyCheckedIn(seniorCheckIns[0]?.timestamp) ? 'green' : 'red',
+            isCheckedInRecently: isRecentlyCheckedIn(seniorCheckIns[0]?.timestamp),
             recentCheckIns: seniorCheckIns,
           },
         ]
@@ -551,7 +616,7 @@ export default function App() {
                 <div>
                   <div className="inline-flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full text-xs font-bold text-emerald-800 mb-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                    Care Recipient Mode • Eleanor Vance
+                    Care Recipient Mode • {seniorUser.name}
                   </div>
                   <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
                     Good Day, {seniorUser.name}! 🌸
@@ -559,6 +624,27 @@ export default function App() {
                   <p className="text-slate-600 text-sm sm:text-base mt-1">
                     Tap any button below to immediately send your daily check-in to your family.
                   </p>
+
+                  {/* Senior Switcher if multiple seniors exist */}
+                  {effectiveSeniors.length > 1 && (
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-semibold text-slate-500">Switch Senior:</span>
+                      {effectiveSeniors.map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => setSelectedSeniorId(s.id)}
+                          className={`text-xs px-2.5 py-1 rounded-lg font-bold border transition-colors cursor-pointer ${
+                            s.id === seniorUser.id
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                          }`}
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs sm:text-sm text-slate-600">
@@ -567,7 +653,7 @@ export default function App() {
                     {familyUser.name} ({familyUser.phone})
                   </div>
                   <div className="text-slate-400 text-xs mt-0.5 font-mono">
-                    Group: {seniorUser.familyGroupId}
+                    Group: {activeFamilyGroupId}
                   </div>
                 </div>
               </div>
@@ -729,8 +815,8 @@ export default function App() {
                 <div>
                   <h4 className="text-lg font-bold text-rose-950">Need Immediate Help?</h4>
                   <p className="text-xs sm:text-sm text-rose-800">
-                    Tap the emergency alert button to immediately send an urgent SOS notification to
-                    David Vance.
+                    Tap the emergency alert button to immediately send an urgent SOS notification to{' '}
+                    {familyUser.name}.
                   </p>
                 </div>
               </div>
@@ -818,7 +904,7 @@ export default function App() {
                 <p className="text-slate-600 text-sm mt-0.5">
                   Shared Family Circle:{' '}
                   <code className="bg-slate-200 text-slate-800 px-2 py-0.5 rounded text-xs font-mono font-bold">
-                    {seniorUser.familyGroupId}
+                    {activeFamilyGroupId}
                   </code>
                 </p>
               </div>
@@ -860,7 +946,7 @@ export default function App() {
                   </div>
                 </div>
                 <span className="text-xs bg-emerald-700/80 border border-emerald-400 font-mono px-3 py-1 rounded-full">
-                  Room: {DEFAULT_FAMILY_GROUP_ID}
+                  Room: {activeFamilyGroupId}
                 </span>
               </div>
             )}
@@ -875,7 +961,7 @@ export default function App() {
                 </div>
                 <div className="flex items-center space-x-2 text-xs text-slate-500">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span>Live Socket.io Room: <code className="font-mono text-slate-700">{DEFAULT_FAMILY_GROUP_ID}</code></span>
+                  <span>Live Socket.io Room: <code className="font-mono text-slate-700">{activeFamilyGroupId}</code></span>
                 </div>
               </div>
 
@@ -904,13 +990,7 @@ export default function App() {
                                 : 'bg-rose-600 text-white'
                             }`}
                           >
-                            {senior.name
-                              ? senior.name
-                                  .split(' ')
-                                  .map((n) => n[0])
-                                  .join('')
-                                  .slice(0, 2)
-                              : 'EV'}
+                            {getInitials(senior.name, 'SR')}
                           </div>
                           <div>
                             <div className="flex items-center space-x-2">
@@ -1056,7 +1136,7 @@ export default function App() {
                         </span>
                       </div>
                       <p className="text-xs text-slate-500 mt-0.5">
-                        Real-time Socket.io updates for room {seniorUser.familyGroupId}
+                        Real-time Socket.io updates for room {activeFamilyGroupId}
                       </p>
                     </div>
                     <span className="text-xs font-extrabold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full">
@@ -1126,9 +1206,31 @@ export default function App() {
                 {/* Manual Check-In Form */}
                 <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs">
                   <h3 className="text-base font-bold text-slate-800 mb-3">
-                    Log Check-In for {seniorUser.name}
+                    Log Check-In for{' '}
+                    {effectiveSeniors.find(
+                      (s) => s.id === (customSeniorId || seniorUser.id)
+                    )?.name || seniorUser.name}
                   </h3>
                   <form onSubmit={handleCustomCheckInSubmit} className="space-y-4">
+                    {effectiveSeniors.length > 1 && (
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">
+                          Select Senior
+                        </label>
+                        <select
+                          value={customSeniorId || seniorUser.id}
+                          onChange={(e) => setCustomSeniorId(e.target.value)}
+                          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500 bg-white"
+                        >
+                          {effectiveSeniors.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name} ({s.phone || 'Senior'})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
                     <div>
                       <label className="block text-xs font-medium text-slate-700 mb-1">
                         Check-In Type
@@ -1183,7 +1285,7 @@ export default function App() {
                   <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
                     <div className="flex items-center space-x-3 pb-3 border-b border-slate-100">
                       <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-base">
-                        EV
+                        {getInitials(seniorUser.name, 'SR')}
                       </div>
                       <div>
                         <h4 className="font-semibold text-slate-800 text-sm">{seniorUser.name}</h4>
@@ -1203,7 +1305,7 @@ export default function App() {
                   <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
                     <div className="flex items-center space-x-3 pb-3 border-b border-slate-100">
                       <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-base">
-                        DV
+                        {getInitials(familyUser.name, 'FM')}
                       </div>
                       <div>
                         <h4 className="font-semibold text-slate-800 text-sm">{familyUser.name}</h4>
@@ -1288,9 +1390,9 @@ export default function App() {
                   </h4>
                   <p className="text-xs text-emerald-800 leading-relaxed">
                     Database seeded with Eleanor Vance (Senior) and David Vance (Family) sharing family
-                    group <code className="font-mono font-semibold">fam_group_carecircle_101</code>.
+                    group <code className="font-mono font-semibold">{activeFamilyGroupId}</code>.
                     Any check-in submitted via the Senior view or API broadcasts in real-time over
-                    Socket.io room <code className="font-mono font-semibold">fam_group_carecircle_101</code>.
+                    Socket.io room <code className="font-mono font-semibold">{activeFamilyGroupId}</code>.
                   </p>
                 </div>
               </div>
