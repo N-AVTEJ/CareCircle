@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { io } from 'socket.io-client'
 import { motion, AnimatePresence } from 'motion/react'
 import MoodTrendView from './components/MoodTrendView.jsx'
+import RiskScoreCard from './components/RiskScoreCard.jsx'
 
 const API_BASE = ''
 const HARDCODED_SENIOR_USER_ID = 'ffd75d01-03e9-4138-abd1-b095ac5ba212'
@@ -100,6 +101,41 @@ export default function App() {
   const [checkInFeedback, setCheckInFeedback] = useState(null)
   const [showSosConfirmDialog, setShowSosConfirmDialog] = useState(false)
 
+  // Risk Score state for family dashboard
+  const [riskData, setRiskData] = useState({
+    riskScore: 0,
+    breakdown: { missedPills: 0, skippedMeals: 0, badMoodStreak: 0 },
+    level: 'LOW',
+  })
+  const [riskLoading, setRiskLoading] = useState(false)
+
+  const fetchRiskScore = useCallback(async (targetUserId) => {
+    const uid = targetUserId || selectedSeniorIdRef.current || HARDCODED_SENIOR_USER_ID
+    if (!uid) return
+    try {
+      setRiskLoading(true)
+      const res = await fetch(`${API_BASE}/api/risk/${encodeURIComponent(uid)}`)
+      if (res.ok) {
+        const json = await res.json()
+        if (json.success || typeof json.riskScore === 'number') {
+          setRiskData({
+            riskScore: json.riskScore ?? json.data?.riskScore ?? 0,
+            breakdown: json.breakdown || json.data?.breakdown || {
+              missedPills: 0,
+              skippedMeals: 0,
+              badMoodStreak: 0,
+            },
+            level: json.level || json.data?.level || 'LOW',
+          })
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching risk score:', err)
+    } finally {
+      setRiskLoading(false)
+    }
+  }, [])
+
   // Family dashboard form states
   const [customCheckInType, setCustomCheckInType] = useState('PILLS')
   const [customCheckInStatus, setCustomCheckInStatus] = useState('Morning medication taken')
@@ -118,7 +154,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [dashRes, uRes, aRes, mRes] = await Promise.all([
+      const [dashRes, uRes, aRes, mRes, rRes] = await Promise.all([
         fetch(`${API_BASE}/api/dashboard/${activeFamilyGroupId}`).then((r) =>
           r.ok ? r.json() : null
         ),
@@ -130,6 +166,9 @@ export default function App() {
         ).then((r) => (r.ok ? r.json() : null)),
         fetch(
           `${API_BASE}/api/checkins?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}${selectedSeniorId ? `&userId=${encodeURIComponent(selectedSeniorId)}` : ''}&type=MOOD&limit=7`
+        ).then((r) => (r.ok ? r.json() : null)),
+        fetch(
+          `${API_BASE}/api/risk/${encodeURIComponent(selectedSeniorId || HARDCODED_SENIOR_USER_ID)}`
         ).then((r) => (r.ok ? r.json() : null)),
       ])
 
@@ -150,6 +189,17 @@ export default function App() {
       }
       if (aRes && aRes.success) {
         setAlerts(aRes.data || [])
+      }
+      if (rRes && (rRes.success || typeof rRes.riskScore === 'number')) {
+        setRiskData({
+          riskScore: rRes.riskScore ?? rRes.data?.riskScore ?? 0,
+          breakdown: rRes.breakdown || rRes.data?.breakdown || {
+            missedPills: 0,
+            skippedMeals: 0,
+            badMoodStreak: 0,
+          },
+          level: rRes.level || rRes.data?.level || 'LOW',
+        })
       }
     } catch {
       setIsLive(false)
@@ -270,6 +320,12 @@ export default function App() {
         seniorName: newCheckIn.user?.name || 'Senior',
         timestamp: newCheckIn.timestamp || new Date().toISOString(),
       })
+
+      // 4. Live Risk Score refresh on every 'checkin:new' socket event (recompute live, no page refresh)
+      const targetSeniorId = selectedSeniorIdRef.current || HARDCODED_SENIOR_USER_ID
+      if (!newCheckIn.userId || newCheckIn.userId === targetSeniorId) {
+        fetchRiskScore(newCheckIn.userId || targetSeniorId)
+      }
     })
 
     const triggerAudioVibrationAlert = () => {
@@ -463,7 +519,7 @@ export default function App() {
     return () => {
       socket.disconnect()
     }
-  }, [activeFamilyGroupId, loadData])
+  }, [activeFamilyGroupId, loadData, fetchRiskScore])
 
   // Auto-dismiss feedback toast after 6 seconds
   useEffect(() => {
@@ -593,6 +649,7 @@ export default function App() {
               return s
             })
           })
+          fetchRiskScore(seniorId)
         }
       } else {
         const err = await res.json()
@@ -654,6 +711,7 @@ export default function App() {
               return s
             })
           )
+          fetchRiskScore(targetSeniorId)
         }
         setCustomCheckInStatus('')
       } else {
@@ -1146,131 +1204,265 @@ export default function App() {
                 Daily Check-In Buttons
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                {/* 1. PILLS BUTTON */}
-                <motion.button
+                {/* 1. PILLS COLUMN */}
+                <div className="flex flex-col">
+                  <motion.button
+                    type="button"
+                    data-testid="senior-button-pills"
+                    aria-label="Pills Check-In"
+                    onClick={() => handleSeniorCheckIn('PILLS', 'Morning medications taken')}
+                    disabled={Boolean(pendingButton)}
+                    whileHover={{ scale: 1.015, y: -2 }}
+                    whileTap={{ scale: 0.96, y: 2 }}
+                    transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                    className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
+                      pendingButton === 'PILLS'
+                        ? 'opacity-70 bg-blue-100 border-blue-500'
+                        : pendingButton
+                        ? 'opacity-50 cursor-not-allowed bg-blue-50/50 border-blue-200'
+                        : 'bg-gradient-to-br from-blue-50 via-white to-blue-100 hover:from-blue-100 hover:to-indigo-100 border-blue-500 hover:border-blue-700'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Pills">
+                        💊
+                      </span>
+                      <span className="text-xs font-black px-3 py-1 rounded-full bg-blue-200/80 text-blue-950 border border-blue-300">
+                        {pendingButton === 'PILLS' ? 'Sending...' : '1-Tap'}
+                      </span>
+                    </div>
+
+                    <div className="mt-4">
+                      <h3 className="text-2xl sm:text-3xl font-black text-blue-950 tracking-tight">
+                        Pills
+                      </h3>
+                      <p className="text-sm sm:text-base font-bold text-blue-900 mt-1">Took My Medication</p>
+                    </div>
+
+                    <div className="mt-6 pt-3 border-t border-blue-300/70 flex items-center justify-between text-xs sm:text-sm text-blue-900 font-semibold">
+                      <span>Last taken:</span>
+                      <span className="font-black">
+                        {getLastCheckInTime('PILLS') || 'Not yet today'}
+                      </span>
+                    </div>
+                  </motion.button>
+
+                  <motion.button
+                    type="button"
+                    data-testid="senior-button-pills-missed"
+                    aria-label="Missed Pills Check-In"
+                    onClick={() => handleSeniorCheckIn('PILLS', 'No')}
+                    disabled={Boolean(pendingButton)}
+                    whileHover={{ scale: 1.015 }}
+                    whileTap={{ scale: 0.97 }}
+                    transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                    className="w-full mt-2.5 min-h-[56px] px-4 py-3 rounded-2xl bg-white hover:bg-rose-50 text-rose-700 hover:text-rose-900 border-2 border-rose-300 font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs tactile-button"
+                  >
+                    <span className="text-base select-none">⚠️</span>
+                    <span>Missed / No Pills</span>
+                  </motion.button>
+                </div>
+
+                {/* 2. MEAL COLUMN */}
+                <div className="flex flex-col">
+                  <motion.button
+                    type="button"
+                    data-testid="senior-button-meal"
+                    aria-label="Meal Check-In"
+                    onClick={() => handleSeniorCheckIn('MEAL', 'Finished a healthy meal')}
+                    disabled={Boolean(pendingButton)}
+                    whileHover={{ scale: 1.015, y: -2 }}
+                    whileTap={{ scale: 0.96, y: 2 }}
+                    transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                    className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
+                      pendingButton === 'MEAL'
+                        ? 'opacity-70 bg-emerald-100 border-emerald-500'
+                        : pendingButton
+                        ? 'opacity-50 cursor-not-allowed bg-emerald-50/50 border-emerald-200'
+                        : 'bg-gradient-to-br from-emerald-50 via-white to-emerald-100 hover:from-emerald-100 hover:to-teal-100 border-emerald-500 hover:border-emerald-700'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Meal">
+                        🍲
+                      </span>
+                      <span className="text-xs font-black px-3 py-1 rounded-full bg-emerald-200/80 text-emerald-950 border border-emerald-300">
+                        {pendingButton === 'MEAL' ? 'Sending...' : '1-Tap'}
+                      </span>
+                    </div>
+
+                    <div className="mt-4">
+                      <h3 className="text-2xl sm:text-3xl font-black text-emerald-950 tracking-tight">
+                        Meal
+                      </h3>
+                      <p className="text-sm sm:text-base font-bold text-emerald-900 mt-1">Ate My Meal</p>
+                    </div>
+
+                    <div className="mt-6 pt-3 border-t border-emerald-300/70 flex items-center justify-between text-xs sm:text-sm text-emerald-900 font-semibold">
+                      <span>Last meal:</span>
+                      <span className="font-black">
+                        {getLastCheckInTime('MEAL') || 'Not yet today'}
+                      </span>
+                    </div>
+                  </motion.button>
+
+                  <motion.button
+                    type="button"
+                    data-testid="senior-button-meal-skipped"
+                    aria-label="Skipped Meal Check-In"
+                    onClick={() => handleSeniorCheckIn('MEAL', 'Skipped')}
+                    disabled={Boolean(pendingButton)}
+                    whileHover={{ scale: 1.015 }}
+                    whileTap={{ scale: 0.97 }}
+                    transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                    className="w-full mt-2.5 min-h-[56px] px-4 py-3 rounded-2xl bg-white hover:bg-amber-50 text-amber-800 hover:text-amber-950 border-2 border-amber-300 font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs tactile-button"
+                  >
+                    <span className="text-base select-none">⚠️</span>
+                    <span>Skipped Meal</span>
+                  </motion.button>
+                </div>
+
+                {/* 3. MOOD COLUMN */}
+                <div className="flex flex-col">
+                  <motion.button
+                    type="button"
+                    data-testid="senior-button-mood"
+                    aria-label="Mood Check-In"
+                    onClick={() => handleSeniorCheckIn('MOOD', 'Feeling good and cheerful')}
+                    disabled={Boolean(pendingButton)}
+                    whileHover={{ scale: 1.015, y: -2 }}
+                    whileTap={{ scale: 0.96, y: 2 }}
+                    transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                    className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
+                      pendingButton === 'MOOD'
+                        ? 'opacity-70 bg-purple-100 border-purple-500'
+                        : pendingButton
+                        ? 'opacity-50 cursor-not-allowed bg-purple-50/50 border-purple-200'
+                        : 'bg-gradient-to-br from-purple-50 via-white to-purple-100 hover:from-purple-100 hover:to-pink-100 border-purple-500 hover:border-purple-700'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Mood">
+                        😊
+                      </span>
+                      <span className="text-xs font-black px-3 py-1 rounded-full bg-purple-200/80 text-purple-950 border border-purple-300">
+                        {pendingButton === 'MOOD' ? 'Sending...' : '1-Tap'}
+                      </span>
+                    </div>
+
+                    <div className="mt-4">
+                      <h3 className="text-2xl sm:text-3xl font-black text-purple-950 tracking-tight">
+                        Mood
+                      </h3>
+                      <p className="text-sm sm:text-base font-bold text-purple-900 mt-1">Feeling Good</p>
+                    </div>
+
+                    <div className="mt-6 pt-3 border-t border-purple-300/70 flex items-center justify-between text-xs sm:text-sm text-purple-900 font-semibold">
+                      <span>Last shared:</span>
+                      <span className="font-black">
+                        {getLastCheckInTime('MOOD') || 'Not yet today'}
+                      </span>
+                    </div>
+                  </motion.button>
+
+                  <motion.button
+                    type="button"
+                    data-testid="senior-button-mood-bad"
+                    aria-label="Bad Mood Check-In"
+                    onClick={() => handleSeniorCheckIn('MOOD', 'Not Good')}
+                    disabled={Boolean(pendingButton)}
+                    whileHover={{ scale: 1.015 }}
+                    whileTap={{ scale: 0.97 }}
+                    transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                    className="w-full mt-2.5 min-h-[56px] px-4 py-3 rounded-2xl bg-white hover:bg-purple-50 text-purple-900 hover:text-purple-950 border-2 border-purple-300 font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs tactile-button"
+                  >
+                    <span className="text-base select-none">😔</span>
+                    <span>Not Good / Low Mood</span>
+                  </motion.button>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Diverse Check-In & Testing Controls */}
+            <div className="bg-white rounded-3xl p-5 sm:p-6 border-2 border-slate-200 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3 pb-2 border-b border-slate-100">
+                <div className="flex items-center space-x-2">
+                  <span className="text-base select-none">🎛️</span>
+                  <h4 className="text-sm font-bold text-slate-800">
+                    Quick Check-In Controls (Standard & Diverse Adverse Triggers)
+                  </h4>
+                </div>
+                <span className="text-[11px] font-semibold text-slate-500">
+                  Easily submit check-ins to trigger risk score changes live
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+                <button
                   type="button"
-                  data-testid="senior-button-pills"
-                  aria-label="Pills Check-In"
-                  onClick={() => handleSeniorCheckIn('PILLS', 'Morning medications taken')}
+                  data-testid="senior-button-pills-yes"
+                  onClick={() => handleSeniorCheckIn('PILLS', 'Yes')}
                   disabled={Boolean(pendingButton)}
-                  whileHover={{ scale: 1.015, y: -2 }}
-                  whileTap={{ scale: 0.96, y: 2 }}
-                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
-                  className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
-                    pendingButton === 'PILLS'
-                      ? 'opacity-70 bg-blue-100 border-blue-500'
-                      : pendingButton
-                      ? 'opacity-50 cursor-not-allowed bg-blue-50/50 border-blue-200'
-                      : 'bg-gradient-to-br from-blue-50 via-white to-blue-100 hover:from-blue-100 hover:to-indigo-100 border-blue-500 hover:border-blue-700'
-                  }`}
+                  className="min-h-[60px] p-2.5 rounded-2xl bg-blue-50 hover:bg-blue-100 text-blue-950 border border-blue-300 font-bold text-xs flex flex-col items-center justify-center text-center transition-all cursor-pointer tactile-button"
                 >
-                  <div className="flex items-start justify-between">
-                    <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Pills">
-                      💊
-                    </span>
-                    <span className="text-xs font-black px-3 py-1 rounded-full bg-blue-200/80 text-blue-950 border border-blue-300">
-                      {pendingButton === 'PILLS' ? 'Sending...' : '1-Tap'}
-                    </span>
-                  </div>
+                  <span className="text-xl select-none">💊</span>
+                  <span>Took Pills (Yes)</span>
+                </button>
 
-                  <div className="mt-4">
-                    <h3 className="text-2xl sm:text-3xl font-black text-blue-950 tracking-tight">
-                      Pills
-                    </h3>
-                    <p className="text-sm sm:text-base font-bold text-blue-900 mt-1">Took My Medication</p>
-                  </div>
-
-                  <div className="mt-6 pt-3 border-t border-blue-300/70 flex items-center justify-between text-xs sm:text-sm text-blue-900 font-semibold">
-                    <span>Last taken:</span>
-                    <span className="font-black">
-                      {getLastCheckInTime('PILLS') || 'Not yet today'}
-                    </span>
-                  </div>
-                </motion.button>
-
-                {/* 2. MEAL BUTTON */}
-                <motion.button
+                <button
                   type="button"
-                  data-testid="senior-button-meal"
-                  aria-label="Meal Check-In"
+                  data-testid="senior-button-meal-ate"
                   onClick={() => handleSeniorCheckIn('MEAL', 'Finished a healthy meal')}
                   disabled={Boolean(pendingButton)}
-                  whileHover={{ scale: 1.015, y: -2 }}
-                  whileTap={{ scale: 0.96, y: 2 }}
-                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
-                  className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
-                    pendingButton === 'MEAL'
-                      ? 'opacity-70 bg-emerald-100 border-emerald-500'
-                      : pendingButton
-                      ? 'opacity-50 cursor-not-allowed bg-emerald-50/50 border-emerald-200'
-                      : 'bg-gradient-to-br from-emerald-50 via-white to-emerald-100 hover:from-emerald-100 hover:to-teal-100 border-emerald-500 hover:border-emerald-700'
-                  }`}
+                  className="min-h-[60px] p-2.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 text-emerald-950 border border-emerald-300 font-bold text-xs flex flex-col items-center justify-center text-center transition-all cursor-pointer tactile-button"
                 >
-                  <div className="flex items-start justify-between">
-                    <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Meal">
-                      🍲
-                    </span>
-                    <span className="text-xs font-black px-3 py-1 rounded-full bg-emerald-200/80 text-emerald-950 border border-emerald-300">
-                      {pendingButton === 'MEAL' ? 'Sending...' : '1-Tap'}
-                    </span>
-                  </div>
+                  <span className="text-xl select-none">🍲</span>
+                  <span>Ate Meal</span>
+                </button>
 
-                  <div className="mt-4">
-                    <h3 className="text-2xl sm:text-3xl font-black text-emerald-950 tracking-tight">
-                      Meal
-                    </h3>
-                    <p className="text-sm sm:text-base font-bold text-emerald-900 mt-1">Ate My Meal</p>
-                  </div>
-
-                  <div className="mt-6 pt-3 border-t border-emerald-300/70 flex items-center justify-between text-xs sm:text-sm text-emerald-900 font-semibold">
-                    <span>Last meal:</span>
-                    <span className="font-black">
-                      {getLastCheckInTime('MEAL') || 'Not yet today'}
-                    </span>
-                  </div>
-                </motion.button>
-
-                {/* 3. MOOD BUTTON */}
-                <motion.button
+                <button
                   type="button"
-                  data-testid="senior-button-mood"
-                  aria-label="Mood Check-In"
+                  data-testid="senior-button-mood-good"
                   onClick={() => handleSeniorCheckIn('MOOD', 'Feeling good and cheerful')}
                   disabled={Boolean(pendingButton)}
-                  whileHover={{ scale: 1.015, y: -2 }}
-                  whileTap={{ scale: 0.96, y: 2 }}
-                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
-                  className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
-                    pendingButton === 'MOOD'
-                      ? 'opacity-70 bg-purple-100 border-purple-500'
-                      : pendingButton
-                      ? 'opacity-50 cursor-not-allowed bg-purple-50/50 border-purple-200'
-                      : 'bg-gradient-to-br from-purple-50 via-white to-purple-100 hover:from-purple-100 hover:to-pink-100 border-purple-500 hover:border-purple-700'
-                  }`}
+                  className="min-h-[60px] p-2.5 rounded-2xl bg-purple-50 hover:bg-purple-100 text-purple-950 border border-purple-300 font-bold text-xs flex flex-col items-center justify-center text-center transition-all cursor-pointer tactile-button"
                 >
-                  <div className="flex items-start justify-between">
-                    <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Mood">
-                      😊
-                    </span>
-                    <span className="text-xs font-black px-3 py-1 rounded-full bg-purple-200/80 text-purple-950 border border-purple-300">
-                      {pendingButton === 'MOOD' ? 'Sending...' : '1-Tap'}
-                    </span>
-                  </div>
+                  <span className="text-xl select-none">😊</span>
+                  <span>Feeling Good</span>
+                </button>
 
-                  <div className="mt-4">
-                    <h3 className="text-2xl sm:text-3xl font-black text-purple-950 tracking-tight">
-                      Mood
-                    </h3>
-                    <p className="text-sm sm:text-base font-bold text-purple-900 mt-1">Feeling Good</p>
-                  </div>
+                <button
+                  type="button"
+                  data-testid="quick-button-pills-missed"
+                  onClick={() => handleSeniorCheckIn('PILLS', 'No')}
+                  disabled={Boolean(pendingButton)}
+                  className="min-h-[60px] p-2.5 rounded-2xl bg-rose-50 hover:bg-rose-100 text-rose-950 border-2 border-rose-300 font-extrabold text-xs flex flex-col items-center justify-center text-center transition-all cursor-pointer tactile-button"
+                >
+                  <span className="text-xl select-none">💊❌</span>
+                  <span>Missed Pills</span>
+                </button>
 
-                  <div className="mt-6 pt-3 border-t border-purple-300/70 flex items-center justify-between text-xs sm:text-sm text-purple-900 font-semibold">
-                    <span>Last shared:</span>
-                    <span className="font-black">
-                      {getLastCheckInTime('MOOD') || 'Not yet today'}
-                    </span>
-                  </div>
-                </motion.button>
+                <button
+                  type="button"
+                  data-testid="quick-button-meal-skipped"
+                  onClick={() => handleSeniorCheckIn('MEAL', 'Skipped')}
+                  disabled={Boolean(pendingButton)}
+                  className="min-h-[60px] p-2.5 rounded-2xl bg-amber-50 hover:bg-amber-100 text-amber-950 border-2 border-amber-300 font-extrabold text-xs flex flex-col items-center justify-center text-center transition-all cursor-pointer tactile-button"
+                >
+                  <span className="text-xl select-none">🍲❌</span>
+                  <span>Skipped Meal</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="quick-button-mood-bad"
+                  onClick={() => handleSeniorCheckIn('MOOD', 'Not Good')}
+                  disabled={Boolean(pendingButton)}
+                  className="min-h-[60px] p-2.5 rounded-2xl bg-red-50 hover:bg-red-100 text-red-950 border-2 border-red-300 font-extrabold text-xs flex flex-col items-center justify-center text-center transition-all cursor-pointer tactile-button"
+                >
+                  <span className="text-xl select-none">😔</span>
+                  <span>Not Good Mood</span>
+                </button>
               </div>
             </div>
 
@@ -1642,6 +1834,16 @@ export default function App() {
                 })}
               </div>
             )}
+
+            {/* 7-Day Rule-Based Health Risk Assessment with SVG Circular Ring */}
+            <RiskScoreCard
+              riskScore={riskData.riskScore}
+              breakdown={riskData.breakdown}
+              level={riskData.level}
+              loading={riskLoading}
+              seniorName={seniorUser.name}
+              onRefresh={() => fetchRiskScore(seniorUser.id)}
+            />
 
             {/* ========================================================== */}
             {/* SENIOR CHECK-IN STATUS CARDS (GREEN / RED)                 */}
