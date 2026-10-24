@@ -25,12 +25,16 @@ app.get('/', (req, res) => {
     message: 'Welcome to CareCircle API',
     endpoints: {
       health: 'GET /health',
-      users: 'GET /api/users',
+      users: 'GET /api/users, GET /api/users/:id',
       checkins: 'GET /api/checkins, POST /api/checkins',
       alerts: 'GET /api/alerts, POST /api/alerts, PATCH /api/alerts/:id',
     },
   })
 })
+
+const ALLOWED_CHECKIN_TYPES = ['PILLS', 'MEAL', 'MOOD']
+const ALLOWED_ALERT_TYPES = ['NO_CHECKIN', 'SOS']
+const ALLOWED_ALERT_STATUSES = ['ACTIVE', 'RESOLVED']
 
 // Get all users (optional ?familyGroupId= filter)
 app.get('/api/users', async (req, res) => {
@@ -51,6 +55,31 @@ app.get('/api/users', async (req, res) => {
     res.json({ success: true, count: users.length, data: users })
   } catch (error) {
     console.error('Error fetching users:', error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
+// Get single user by id
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+    const user = await prisma.user.findUnique({
+      where: { id },
+      include: {
+        checkIns: {
+          orderBy: { timestamp: 'desc' },
+        },
+        alerts: {
+          orderBy: { timestamp: 'desc' },
+        },
+      },
+    })
+    if (!user) {
+      return res.status(404).json({ success: false, error: `User with id '${id}' not found` })
+    }
+    res.json({ success: true, data: user })
+  } catch (error) {
+    console.error('Error fetching user:', error)
     res.status(500).json({ success: false, error: error.message })
   }
 })
@@ -83,6 +112,21 @@ app.post('/api/checkins', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'userId, type (PILLS/MEAL/MOOD), and status are required',
+      })
+    }
+
+    if (!ALLOWED_CHECKIN_TYPES.includes(type)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid check-in type '${type}'. Allowed types: ${ALLOWED_CHECKIN_TYPES.join(', ')}`,
+      })
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: String(userId) } })
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: `User with id '${userId}' not found`,
       })
     }
 
@@ -138,6 +182,28 @@ app.post('/api/alerts', async (req, res) => {
       })
     }
 
+    if (!ALLOWED_ALERT_TYPES.includes(type)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid alert type '${type}'. Allowed types: ${ALLOWED_ALERT_TYPES.join(', ')}`,
+      })
+    }
+
+    if (status && !ALLOWED_ALERT_STATUSES.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: `status must be ACTIVE or RESOLVED`,
+      })
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: String(userId) } })
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: `User with id '${userId}' not found`,
+      })
+    }
+
     const alert = await prisma.alert.create({
       data: {
         userId,
@@ -158,10 +224,10 @@ app.post('/api/alerts', async (req, res) => {
 
 // Update alert status (e.g. resolve)
 app.patch('/api/alerts/:id', async (req, res) => {
+  const { id } = req.params
   try {
-    const { id } = req.params
     const { status } = req.body
-    if (!status || !['ACTIVE', 'RESOLVED'].includes(status)) {
+    if (!status || !ALLOWED_ALERT_STATUSES.includes(status)) {
       return res.status(400).json({
         success: false,
         error: 'status must be ACTIVE or RESOLVED',
@@ -174,6 +240,12 @@ app.patch('/api/alerts/:id', async (req, res) => {
     })
     res.json({ success: true, data: updatedAlert })
   } catch (error) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({
+        success: false,
+        error: `Alert with id '${id}' not found`,
+      })
+    }
     console.error('Error updating alert:', error)
     res.status(500).json({ success: false, error: error.message })
   }
