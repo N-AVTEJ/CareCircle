@@ -218,10 +218,12 @@ export default function App() {
 
         return prevSeniors.map((senior) => {
           if (senior.id === targetId) {
+            const hasAlerts = (senior.activeAlerts || []).some((a) => a.status === 'ACTIVE')
+            const isSafe = !hasAlerts
             return {
               ...senior,
-              status: 'GREEN',
-              statusColor: 'green',
+              status: isSafe ? 'GREEN' : 'RED',
+              statusColor: isSafe ? 'green' : 'red',
               latestCheckIn: newCheckIn,
               lastCheckInTime: newCheckIn.timestamp,
               isCheckedInRecently: true,
@@ -247,6 +249,9 @@ export default function App() {
         if (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext)) {
           const AudioCtx = window.AudioContext || window.webkitAudioContext
           const ctx = new AudioCtx()
+          if (ctx.state === 'suspended') {
+            ctx.resume().catch(() => {})
+          }
           const osc = ctx.createOscillator()
           const gain = ctx.createGain()
           osc.type = 'sawtooth'
@@ -282,8 +287,31 @@ export default function App() {
         return [sosAlert, ...prev]
       })
 
-      setDashboardSeniors((prevSeniors) =>
-        prevSeniors.map((senior) => {
+      setDashboardSeniors((prevSeniors) => {
+        const seniorExists = prevSeniors.some((s) => s.id === sosAlert.userId)
+        if (!seniorExists && (sosAlert.user || usersRef.current.find((u) => u.id === sosAlert.userId))) {
+          const uObj = sosAlert.user || usersRef.current.find((u) => u.id === sosAlert.userId)
+          return [
+            ...prevSeniors,
+            {
+              id: sosAlert.userId,
+              name: uObj.name || 'Senior Member',
+              role: uObj.role || 'SENIOR',
+              phone: uObj.phone || '+1-555-0143',
+              familyGroupId: uObj.familyGroupId || activeFamilyGroupId,
+              status: 'RED',
+              statusColor: 'red',
+              hasActiveAlerts: true,
+              activeAlerts: [sosAlert],
+              latestCheckIn: null,
+              lastCheckInTime: null,
+              isCheckedInRecently: false,
+              recentCheckIns: [],
+            },
+          ]
+        }
+
+        return prevSeniors.map((senior) => {
           if (senior.id === sosAlert.userId) {
             const existing = senior.activeAlerts || []
             const updated = existing.some((a) => a.id === sosAlert.id)
@@ -299,7 +327,7 @@ export default function App() {
           }
           return senior
         })
-      )
+      })
 
       triggerAudioVibrationAlert()
 
@@ -351,11 +379,20 @@ export default function App() {
         })
       )
 
+      if (newAlert.type === 'SOS') {
+        triggerAudioVibrationAlert()
+      }
+
       // Live event notification
       setLastLiveEvent({
         id: newAlert.id,
         type: `ALERT_${newAlert.type}`,
-        status: newAlert.type === 'NO_CHECKIN' ? 'No Check-In' : newAlert.type,
+        status:
+          newAlert.type === 'NO_CHECKIN'
+            ? 'No Check-In'
+            : newAlert.type === 'SOS'
+            ? 'EMERGENCY SOS ALERT'
+            : newAlert.type,
         seniorName: newAlert.user?.name || 'Senior',
         timestamp: newAlert.timestamp || new Date().toISOString(),
       })
@@ -417,6 +454,18 @@ export default function App() {
     }, 6000)
     return () => clearTimeout(timer)
   }, [lastLiveEvent])
+
+  // Dismiss SOS confirm dialog on Escape key
+  useEffect(() => {
+    if (!showSosConfirmDialog) return
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !submittingAlert) {
+        setShowSosConfirmDialog(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showSosConfirmDialog, submittingAlert])
 
   // Resolved user models (using seeded data or fallback)
   const seniorFromDashboard =
@@ -493,19 +542,22 @@ export default function App() {
                 },
               ]
             }
-            return prev.map((s) =>
-              s.id === seniorId
-                ? {
-                    ...s,
-                    status: 'GREEN',
-                    statusColor: 'green',
-                    latestCheckIn: json.data,
-                    lastCheckInTime: json.data.timestamp,
-                    isCheckedInRecently: true,
-                    recentCheckIns: [json.data, ...(s.recentCheckIns || [])].slice(0, 5),
-                  }
-                : s
-            )
+            return prev.map((s) => {
+              if (s.id === seniorId) {
+                const hasAlerts = (s.activeAlerts || []).some((a) => a.status === 'ACTIVE')
+                const isSafe = !hasAlerts
+                return {
+                  ...s,
+                  status: isSafe ? 'GREEN' : 'RED',
+                  statusColor: isSafe ? 'green' : 'red',
+                  latestCheckIn: json.data,
+                  lastCheckInTime: json.data.timestamp,
+                  isCheckedInRecently: true,
+                  recentCheckIns: [json.data, ...(s.recentCheckIns || [])].slice(0, 5),
+                }
+              }
+              return s
+            })
           })
         }
       } else {
@@ -545,19 +597,22 @@ export default function App() {
             return [json.data, ...prev]
           })
           setDashboardSeniors((prev) =>
-            prev.map((s) =>
-              s.id === targetSeniorId
-                ? {
-                    ...s,
-                    status: 'GREEN',
-                    statusColor: 'green',
-                    latestCheckIn: json.data,
-                    lastCheckInTime: json.data.timestamp,
-                    isCheckedInRecently: true,
-                    recentCheckIns: [json.data, ...(s.recentCheckIns || [])].slice(0, 5),
-                  }
-                : s
-            )
+            prev.map((s) => {
+              if (s.id === targetSeniorId) {
+                const hasAlerts = (s.activeAlerts || []).some((a) => a.status === 'ACTIVE')
+                const isSafe = !hasAlerts
+                return {
+                  ...s,
+                  status: isSafe ? 'GREEN' : 'RED',
+                  statusColor: isSafe ? 'green' : 'red',
+                  latestCheckIn: json.data,
+                  lastCheckInTime: json.data.timestamp,
+                  isCheckedInRecently: true,
+                  recentCheckIns: [json.data, ...(s.recentCheckIns || [])].slice(0, 5),
+                }
+              }
+              return s
+            })
           )
         }
         setCustomCheckInStatus('')
@@ -574,7 +629,7 @@ export default function App() {
 
   // Alert triggers
   const handleTriggerSos = async () => {
-    setShowSosConfirmDialog(false)
+    if (submittingAlert) return
     setSubmittingAlert(true)
     setErrorMsg(null)
     try {
@@ -588,6 +643,7 @@ export default function App() {
       })
 
       if (res.ok) {
+        setShowSosConfirmDialog(false)
         const json = await res.json()
         const now = new Date()
         const timeStr = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -602,8 +658,29 @@ export default function App() {
             if (prev.some((a) => a.id === json.data.id)) return prev
             return [json.data, ...prev]
           })
-          setDashboardSeniors((prev) =>
-            prev.map((s) =>
+          setDashboardSeniors((prev) => {
+            const exists = prev.some((s) => s.id === seniorId)
+            if (!exists) {
+              return [
+                ...prev,
+                {
+                  id: seniorId,
+                  name: json.data.user?.name || seniorUser.name,
+                  role: 'SENIOR',
+                  phone: json.data.user?.phone || seniorUser.phone,
+                  familyGroupId: activeFamilyGroupId,
+                  status: 'RED',
+                  statusColor: 'red',
+                  hasActiveAlerts: true,
+                  activeAlerts: [json.data],
+                  latestCheckIn: null,
+                  lastCheckInTime: null,
+                  isCheckedInRecently: false,
+                  recentCheckIns: [],
+                },
+              ]
+            }
+            return prev.map((s) =>
               s.id === seniorId
                 ? {
                     ...s,
@@ -614,7 +691,7 @@ export default function App() {
                   }
                 : s
             )
-          )
+          })
         }
       } else {
         const err = await res.json()
@@ -917,27 +994,77 @@ export default function App() {
               </div>
             </div>
 
-            {/* Check-In Success Toast */}
+            {/* Check-In / SOS Feedback Toast */}
             {checkInFeedback && (
               <div
                 data-testid="checkin-feedback"
-                className="p-4 sm:p-5 rounded-2xl bg-emerald-50 border-2 border-emerald-400 text-emerald-900 shadow-sm animate-fade-in flex items-center justify-between"
+                className={`p-4 sm:p-5 rounded-2xl border-2 shadow-sm animate-fade-in flex items-center justify-between ${
+                  checkInFeedback.type === 'SOS'
+                    ? 'bg-red-50 border-red-500 text-red-950 ring-2 ring-red-200'
+                    : 'bg-emerald-50 border-emerald-400 text-emerald-900'
+                }`}
               >
                 <div className="flex items-center space-x-3">
-                  <span className="text-3xl">✅</span>
+                  <span className="text-3xl select-none">
+                    {checkInFeedback.type === 'SOS' ? '🚨' : '✅'}
+                  </span>
                   <div>
-                    <div className="font-bold text-base sm:text-lg">{checkInFeedback.title}</div>
-                    <div className="text-xs sm:text-sm text-emerald-800">
+                    <div
+                      className={`font-black text-base sm:text-lg ${
+                        checkInFeedback.type === 'SOS' ? 'text-red-950' : 'text-emerald-950'
+                      }`}
+                    >
+                      {checkInFeedback.title}
+                    </div>
+                    <div
+                      className={`text-xs sm:text-sm ${
+                        checkInFeedback.type === 'SOS'
+                          ? 'text-red-800 font-medium'
+                          : 'text-emerald-800 font-medium'
+                      }`}
+                    >
                       {checkInFeedback.message}
                     </div>
                   </div>
                 </div>
                 <button
                   onClick={() => setCheckInFeedback(null)}
-                  className="text-emerald-700 hover:text-emerald-900 font-bold px-3 py-1 text-sm bg-emerald-100 hover:bg-emerald-200 rounded-lg cursor-pointer transition-colors"
+                  className={`font-bold px-3 py-1 text-sm rounded-lg cursor-pointer transition-colors ${
+                    checkInFeedback.type === 'SOS'
+                      ? 'text-red-800 hover:text-red-950 bg-red-100 hover:bg-red-200'
+                      : 'text-emerald-700 hover:text-emerald-900 bg-emerald-100 hover:bg-emerald-200'
+                  }`}
                 >
                   Dismiss
                 </button>
+              </div>
+            )}
+
+            {/* Active SOS Emergency Notice for Senior */}
+            {activeSosAlerts.some((a) => a.userId === seniorUser.id) && (
+              <div
+                data-testid="senior-active-sos-banner"
+                role="alert"
+                className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white shadow-lg border-2 border-red-400 animate-pulse flex items-center justify-between gap-4"
+              >
+                <div className="flex items-center space-x-3">
+                  <span className="text-3xl select-none">🚨</span>
+                  <div>
+                    <div className="font-black text-base sm:text-lg">
+                      Emergency Alert Active — Help is on the way!
+                    </div>
+                    <div className="text-xs sm:text-sm text-red-100 font-medium">
+                      Your family caregiver {familyUser.name} ({familyUser.phone}) has been notified.
+                    </div>
+                  </div>
+                </div>
+                <a
+                  href={`tel:${familyUser.phone}`}
+                  data-testid="senior-call-caregiver-button"
+                  className="shrink-0 bg-white hover:bg-red-50 text-red-700 font-black text-xs sm:text-sm px-4 py-2.5 rounded-xl transition-colors shadow-xs cursor-pointer"
+                >
+                  📞 Call Caregiver
+                </a>
               </div>
             )}
 
@@ -1116,6 +1243,11 @@ export default function App() {
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="sos-confirm-title"
+                onClick={(e) => {
+                  if (e.target === e.currentTarget && !submittingAlert) {
+                    setShowSosConfirmDialog(false)
+                  }
+                }}
                 className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs animate-fade-in"
               >
                 <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border-4 border-red-500 space-y-6 text-center">
@@ -1141,12 +1273,23 @@ export default function App() {
                     ⚠️ Only send this alert if you are experiencing an emergency or need urgent help.
                   </div>
 
+                  {errorMsg && (
+                    <div className="bg-red-50 border border-red-300 rounded-xl p-3 text-xs text-red-800 font-bold">
+                      ⚠️ {errorMsg}
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
                     <button
                       type="button"
                       data-testid="cancel-sos-button"
                       onClick={() => setShowSosConfirmDialog(false)}
-                      className="w-full py-3.5 px-4 rounded-xl border-2 border-slate-300 hover:bg-slate-100 text-slate-700 font-extrabold text-sm sm:text-base transition-colors cursor-pointer"
+                      disabled={submittingAlert}
+                      className={`w-full py-3.5 px-4 rounded-xl border-2 border-slate-300 text-slate-700 font-extrabold text-sm sm:text-base transition-colors ${
+                        submittingAlert
+                          ? 'opacity-50 cursor-not-allowed'
+                          : 'hover:bg-slate-100 cursor-pointer'
+                      }`}
                     >
                       Cancel
                     </button>
@@ -1156,7 +1299,11 @@ export default function App() {
                       data-testid="confirm-sos-button"
                       onClick={handleTriggerSos}
                       disabled={submittingAlert}
-                      className="w-full py-3.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 active:scale-95 text-white font-black text-sm sm:text-base shadow-lg transition-colors cursor-pointer flex items-center justify-center gap-2"
+                      className={`w-full py-3.5 px-4 rounded-xl bg-red-600 text-white font-black text-sm sm:text-base shadow-lg transition-colors flex items-center justify-center gap-2 ${
+                        submittingAlert
+                          ? 'opacity-70 cursor-wait'
+                          : 'hover:bg-red-700 active:scale-95 cursor-pointer'
+                      }`}
                     >
                       {submittingAlert ? (
                         'Sending...'
@@ -1335,7 +1482,7 @@ export default function App() {
 
                       <div className="flex flex-wrap items-center gap-3 shrink-0">
                         <a
-                          href={`tel:${seniorPhone}`}
+                          href={`tel:${seniorPhone.replace(/\s+/g, '')}`}
                           data-testid="sos-call-now-button"
                           className="inline-flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white font-black text-sm sm:text-base px-6 py-3.5 rounded-2xl shadow-lg border-2 border-emerald-300 transition-all cursor-pointer ring-2 ring-emerald-400/50"
                         >
@@ -1417,7 +1564,10 @@ export default function App() {
 
               <div className="space-y-4">
                 {effectiveSeniors.map((senior) => {
-                  const isGreen = senior.status === 'GREEN'
+                  const hasSosAlert = (senior.activeAlerts || []).some(
+                    (a) => a.type === 'SOS' && a.status === 'ACTIVE'
+                  )
+                  const isGreen = senior.status === 'GREEN' && !hasSosAlert
                   const lastTime = senior.lastCheckInTime || senior.latestCheckIn?.timestamp
 
                   return (
@@ -1425,7 +1575,9 @@ export default function App() {
                       key={senior.id}
                       data-testid="senior-status-card"
                       className={`relative overflow-hidden rounded-3xl border-3 transition-all duration-300 p-6 sm:p-8 shadow-sm ${
-                        isGreen
+                        hasSosAlert
+                          ? 'bg-gradient-to-br from-red-50 via-white to-rose-100 border-red-500 shadow-red-200 ring-2 ring-red-400/50'
+                          : isGreen
                           ? 'bg-gradient-to-br from-emerald-50/90 via-white to-teal-50/40 border-emerald-400 hover:border-emerald-500 shadow-emerald-100/50'
                           : 'bg-gradient-to-br from-rose-50/90 via-white to-amber-50/40 border-rose-400 hover:border-rose-500 shadow-rose-100/50'
                       }`}
@@ -1435,7 +1587,9 @@ export default function App() {
                         <div className="flex items-center space-x-4">
                           <div
                             className={`w-14 h-14 rounded-2xl flex items-center justify-center font-extrabold text-xl shadow-xs select-none ${
-                              isGreen
+                              hasSosAlert
+                                ? 'bg-red-600 text-white animate-pulse'
+                                : isGreen
                                 ? 'bg-emerald-600 text-white'
                                 : 'bg-rose-600 text-white'
                             }`}

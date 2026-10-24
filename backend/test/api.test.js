@@ -1235,6 +1235,97 @@ test('POST /api/sos rejects non-existent userId with 404', async () => {
   assert.ok(json.error.includes('not found'))
 })
 
+test('POST /api/sos rejects non-string userId payloads (number, boolean, null, object, array) with 400', async () => {
+  const invalidPayloads = [
+    { userId: 12345 },
+    { userId: true },
+    { userId: false },
+    { userId: null },
+    { userId: ['ffd75d01-03e9-4138-abd1-b095ac5ba212'] },
+    { userId: { id: 'ffd75d01-03e9-4138-abd1-b095ac5ba212' } },
+  ]
+
+  for (const payload of invalidPayloads) {
+    const res = await fetch(`${baseUrl}/api/sos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    assert.equal(res.status, 400, `Expected 400 for payload: ${JSON.stringify(payload)}`)
+    const json = await res.json()
+    assert.equal(json.success, false)
+    assert.ok(json.error.includes('userId is required'))
+  }
+})
+
+test('GET /api/alerts includes user.phone and priority HIGH for SOS alerts', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const sosRes = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: senior.id }),
+  })
+  assert.equal(sosRes.status, 201)
+  const { data: createdAlert } = await sosRes.json()
+
+  try {
+    const alertsRes = await fetch(`${baseUrl}/api/alerts?familyGroupId=${senior.familyGroupId}`)
+    assert.equal(alertsRes.status, 200)
+    const { data: alertsList } = await alertsRes.json()
+
+    const match = alertsList.find((a) => a.id === createdAlert.id)
+    assert.ok(match, 'Created SOS alert must be present in GET /api/alerts')
+    assert.equal(match.priority, 'HIGH', 'SOS alert must have priority HIGH')
+    assert.ok(match.user, 'user object must exist on alert')
+    assert.equal(match.user.phone, senior.phone, 'user.phone must be returned in GET /api/alerts')
+
+    // Test PATCH returns priority HIGH as well
+    const patchRes = await fetch(`${baseUrl}/api/alerts/${createdAlert.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'RESOLVED' }),
+    })
+    assert.equal(patchRes.status, 200)
+    const patchJson = await patchRes.json()
+    assert.equal(patchJson.data.priority, 'HIGH', 'Resolved SOS alert must retain priority HIGH')
+  } finally {
+    await prisma.alert.deleteMany({ where: { id: createdAlert.id } })
+  }
+})
+
+test('GET /api/dashboard/:familyGroupId includes priority HIGH in senior.activeAlerts for SOS', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const sosRes = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: senior.id }),
+  })
+  assert.equal(sosRes.status, 201)
+  const { data: createdAlert } = await sosRes.json()
+
+  try {
+    const dashRes = await fetch(`${baseUrl}/api/dashboard/${senior.familyGroupId}`)
+    assert.equal(dashRes.status, 200)
+    const dashJson = await dashRes.json()
+
+    const seniorData = dashJson.data.seniors.find((s) => s.id === senior.id)
+    assert.ok(seniorData, 'Senior must be in dashboard response')
+    assert.equal(seniorData.status, 'RED', 'Senior status must be RED when SOS alert is active')
+    const activeSos = seniorData.activeAlerts.find((a) => a.id === createdAlert.id)
+    assert.ok(activeSos, 'Active SOS alert must be present in senior.activeAlerts')
+    assert.equal(activeSos.priority, 'HIGH', 'activeAlerts SOS must have priority HIGH')
+  } finally {
+    await prisma.alert.deleteMany({ where: { id: createdAlert.id } })
+  }
+})
+
+
 
 
 

@@ -192,7 +192,10 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
         isCheckedInRecently,
         latestCheckIn,
         lastCheckInTime,
-        activeAlerts: senior.alerts,
+        activeAlerts: (senior.alerts || []).map((a) => ({
+          ...a,
+          priority: a.type === 'SOS' ? 'HIGH' : 'NORMAL',
+        })),
         hasActiveAlerts: senior.alerts.length > 0,
         recentCheckIns: senior.checkIns,
       }
@@ -381,11 +384,15 @@ app.get('/api/alerts', async (req, res) => {
       orderBy: { timestamp: 'desc' },
       include: {
         user: {
-          select: { id: true, name: true, role: true, familyGroupId: true },
+          select: { id: true, name: true, role: true, familyGroupId: true, phone: true },
         },
       },
     })
-    res.json({ success: true, count: alerts.length, data: alerts })
+    const alertsWithPriority = alerts.map((alert) => ({
+      ...alert,
+      priority: alert.type === 'SOS' ? 'HIGH' : 'NORMAL',
+    }))
+    res.json({ success: true, count: alertsWithPriority.length, data: alertsWithPriority })
   } catch (error) {
     console.error('Error fetching alerts:', error)
     res.status(500).json({ success: false, error: error.message })
@@ -437,14 +444,19 @@ app.post('/api/alerts', async (req, res) => {
       },
     })
 
-    // Emit Socket.io event 'alert:new' to senior's familyGroupId room
-    if (user.familyGroupId) {
-      io.to(user.familyGroupId).emit('alert:new', alert)
-    } else {
-      io.emit('alert:new', alert)
+    const alertPayload = {
+      ...alert,
+      priority: alert.type === 'SOS' ? 'HIGH' : 'NORMAL',
     }
 
-    res.status(201).json({ success: true, data: alert })
+    // Emit Socket.io event 'alert:new' to senior's familyGroupId room
+    if (user.familyGroupId) {
+      io.to(user.familyGroupId).emit('alert:new', alertPayload)
+    } else {
+      io.emit('alert:new', alertPayload)
+    }
+
+    res.status(201).json({ success: true, data: alertPayload })
   } catch (error) {
     console.error('Error creating alert:', error)
     res.status(500).json({ success: false, error: error.message })
@@ -545,20 +557,25 @@ app.patch('/api/alerts/:id', async (req, res) => {
       recordAlertResolution(updatedAlert.userId)
     }
 
+    const alertWithPriority = {
+      ...updatedAlert,
+      priority: updatedAlert.type === 'SOS' ? 'HIGH' : 'NORMAL',
+    }
+
     // Emit Socket.io events when alert is updated/resolved
     if (updatedAlert.user?.familyGroupId) {
-      io.to(updatedAlert.user.familyGroupId).emit('alert:updated', updatedAlert)
+      io.to(updatedAlert.user.familyGroupId).emit('alert:updated', alertWithPriority)
       if (status === 'RESOLVED') {
-        io.to(updatedAlert.user.familyGroupId).emit('alert:resolved', updatedAlert)
+        io.to(updatedAlert.user.familyGroupId).emit('alert:resolved', alertWithPriority)
       }
     } else {
-      io.emit('alert:updated', updatedAlert)
+      io.emit('alert:updated', alertWithPriority)
       if (status === 'RESOLVED') {
-        io.emit('alert:resolved', updatedAlert)
+        io.emit('alert:resolved', alertWithPriority)
       }
     }
 
-    res.json({ success: true, data: updatedAlert })
+    res.json({ success: true, data: alertWithPriority })
   } catch (error) {
     if (error.code === 'P2025') {
       return res.status(404).json({
