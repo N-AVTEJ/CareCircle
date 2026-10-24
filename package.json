@@ -21,7 +21,8 @@
     "verify:checkin": "npm run verify:checkin --workspace=backend",
     "verify:dashboard": "npm run verify:dashboard --workspace=backend",
     "verify:alert": "npm run verify:alert --workspace=backend",
-    "verify:sos": "npm run verify:sos --workspace=backend"
+    "verify:sos": "npm run verify:sos --workspace=backend",
+    "verify:mobile": "npm run verify:mobile --workspace=backend"
   },
   "prisma": {
     "schema": "backend/prisma/schema.prisma"
