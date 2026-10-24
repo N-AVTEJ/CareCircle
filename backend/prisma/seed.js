@@ -11,10 +11,13 @@ async function main() {
   await prisma.user.deleteMany()
 
   const sharedFamilyGroupId = 'fam_group_carecircle_101'
+  const seniorUserId = 'ffd75d01-03e9-4138-abd1-b095ac5ba212'
+  const familyUserId = 'b8d2a563-591c-4b62-87b5-0311485cb5cf'
 
   // 1. Senior user
   const senior = await prisma.user.create({
     data: {
+      id: seniorUserId,
       name: 'Eleanor Vance',
       role: 'SENIOR',
       phone: '+1-555-0143',
@@ -25,6 +28,7 @@ async function main() {
   // 2. Family user
   const familyMember = await prisma.user.create({
     data: {
+      id: familyUserId,
       name: 'David Vance',
       role: 'FAMILY',
       phone: '+1-555-0198',

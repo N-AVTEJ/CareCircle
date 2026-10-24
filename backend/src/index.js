@@ -1,14 +1,44 @@
 import 'dotenv/config'
+import http from 'node:http'
 import express from 'express'
 import cors from 'cors'
+import { Server } from 'socket.io'
 import { PrismaClient } from '@prisma/client'
 
 const app = express()
+const server = http.createServer(app)
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST', 'PATCH'],
+  },
+})
+
 const prisma = new PrismaClient()
 const PORT = process.env.PORT || 5000
 
 app.use(cors())
 app.use(express.json())
+
+// Socket.io room management for family groups
+io.on('connection', (socket) => {
+  const queryFamilyGroupId = socket.handshake.query?.familyGroupId
+  if (queryFamilyGroupId) {
+    socket.join(String(queryFamilyGroupId))
+  }
+
+  socket.on('join', (room) => {
+    if (room) socket.join(String(room))
+  })
+
+  socket.on('join:family', (room) => {
+    if (room) socket.join(String(room))
+  })
+
+  socket.on('join_room', (room) => {
+    if (room) socket.join(String(room))
+  })
+})
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -26,6 +56,7 @@ app.get('/', (req, res) => {
     endpoints: {
       health: 'GET /health',
       users: 'GET /api/users, GET /api/users/:id',
+      checkin: 'POST /api/checkin',
       checkins: 'GET /api/checkins, POST /api/checkins',
       alerts: 'GET /api/alerts, POST /api/alerts, PATCH /api/alerts/:id',
     },
@@ -104,8 +135,8 @@ app.get('/api/checkins', async (req, res) => {
   }
 })
 
-// Create check-in
-app.post('/api/checkins', async (req, res) => {
+// Create check-in handler (available via POST /api/checkin and POST /api/checkins)
+const handleCreateCheckIn = async (req, res) => {
   try {
     const { userId, type, status, timestamp } = req.body
     if (!userId || !type || !status) {
@@ -134,19 +165,28 @@ app.post('/api/checkins', async (req, res) => {
       data: {
         userId,
         type,
-        status,
+        status: typeof status === 'string' ? status.trim() : String(status),
         timestamp: timestamp ? new Date(timestamp) : new Date(),
       },
       include: {
         user: true,
       },
     })
+
+    // Emit Socket.io event 'checkin:new' to that familyGroupId's room
+    if (user.familyGroupId) {
+      io.to(user.familyGroupId).emit('checkin:new', checkIn)
+    }
+
     res.status(201).json({ success: true, data: checkIn })
   } catch (error) {
     console.error('Error creating check-in:', error)
     res.status(500).json({ success: false, error: error.message })
   }
-})
+}
+
+app.post('/api/checkin', handleCreateCheckIn)
+app.post('/api/checkins', handleCreateCheckIn)
 
 // Get alerts
 app.get('/api/alerts', async (req, res) => {
@@ -254,10 +294,10 @@ app.patch('/api/alerts/:id', async (req, res) => {
 const isMain = process.argv[1] && (process.argv[1].endsWith('src/index.js') || process.argv[1].endsWith('src\\index.js'))
 
 if (isMain) {
-  app.listen(PORT, () => {
+  server.listen(PORT, () => {
     console.log(`CareCircle backend server running on http://localhost:${PORT}`)
   })
 }
 
-export { app, prisma }
+export { app, server, io, prisma }
 export default app

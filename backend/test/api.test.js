@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { app, prisma } from '../src/index.js'
+import { app, server, io, prisma } from '../src/index.js'
+import { io as Client } from 'socket.io-client'
 
-let server
 let baseUrl
 
 test.before(async () => {
   await new Promise((resolve) => {
-    server = app.listen(0, () => {
+    server.listen(0, () => {
       const port = server.address().port
       baseUrl = `http://localhost:${port}`
       resolve()
@@ -16,6 +16,7 @@ test.before(async () => {
 })
 
 test.after(async () => {
+  io.close()
   if (server) {
     server.closeAllConnections?.()
     await new Promise((resolve) => server.close(resolve))
@@ -72,6 +73,127 @@ test('GET /api/users/:id returns single user details', async () => {
 test('GET /api/users/:id returns 404 for non-existent user', async () => {
   const res = await fetch(`${baseUrl}/api/users/non-existent-user-id`)
   assert.equal(res.status, 404)
+  const json = await res.json()
+  assert.equal(json.success, false)
+})
+
+test('POST /api/checkin creates a new check-in and persists row in CheckIn table', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'PILLS',
+      status: 'Morning medication taken',
+    }),
+  })
+  assert.equal(res.status, 201)
+  const json = await res.json()
+  assert.equal(json.success, true)
+  assert.equal(json.data.type, 'PILLS')
+  assert.equal(json.data.status, 'Morning medication taken')
+  assert.equal(json.data.userId, senior.id)
+
+  // Verify direct database persistence in CheckIn table
+  const dbRecord = await prisma.checkIn.findUnique({
+    where: { id: json.data.id },
+  })
+  assert.ok(dbRecord, 'CheckIn row must exist in database')
+  assert.equal(dbRecord.userId, senior.id)
+  assert.equal(dbRecord.type, 'PILLS')
+  assert.equal(dbRecord.status, 'Morning medication taken')
+})
+
+test('POST /api/checkin emits Socket.io event "checkin:new" to familyGroupId room', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  // Socket 1: listening in senior's familyGroupId room
+  const socketSameFamily = Client(baseUrl, {
+    query: { familyGroupId: senior.familyGroupId },
+    transports: ['websocket'],
+  })
+
+  // Socket 2: listening in an unrelated room
+  const socketOtherFamily = Client(baseUrl, {
+    query: { familyGroupId: 'unrelated_family_group_999' },
+    transports: ['websocket'],
+  })
+
+  await Promise.all([
+    new Promise((resolve) => socketSameFamily.on('connect', resolve)),
+    new Promise((resolve) => socketOtherFamily.on('connect', resolve)),
+  ])
+
+  let otherRoomReceived = false
+  socketOtherFamily.on('checkin:new', () => {
+    otherRoomReceived = true
+  })
+
+  const eventPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timed out waiting for checkin:new event')), 4000)
+    socketSameFamily.on('checkin:new', (payload) => {
+      clearTimeout(timeout)
+      resolve(payload)
+    })
+  })
+
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'MOOD',
+      status: 'Feeling great and cheerful',
+    }),
+  })
+  assert.equal(res.status, 201)
+
+  const received = await eventPromise
+  assert.equal(received.type, 'MOOD')
+  assert.equal(received.status, 'Feeling great and cheerful')
+  assert.equal(received.userId, senior.id)
+
+  await new Promise((r) => setTimeout(r, 100))
+  assert.equal(otherRoomReceived, false, 'Unrelated room must NOT receive the checkin:new event')
+
+  socketSameFamily.disconnect()
+  socketOtherFamily.disconnect()
+})
+
+test('POST /api/checkin rejects missing fields with 400', async () => {
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'PILLS',
+    }),
+  })
+  assert.equal(res.status, 400)
+  const json = await res.json()
+  assert.equal(json.success, false)
+})
+
+test('POST /api/checkin rejects invalid check-in type with 400', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'UNKNOWN_TYPE',
+      status: 'Some status',
+    }),
+  })
+  assert.equal(res.status, 400)
   const json = await res.json()
   assert.equal(json.success, false)
 })
