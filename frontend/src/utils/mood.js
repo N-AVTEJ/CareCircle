@@ -54,6 +54,12 @@ export const MOOD_LEVELS = {
   },
 }
 
+const DISTRESS_EMOJIS = ['😔', '😢', '😭', '🤒', '🤕', '💔', '😞', '😟', '😰', '😿']
+const TIRED_EMOJIS = ['😴', '🥱', '😮‍💨', '😪']
+const GREAT_EMOJIS = ['😄', '😃', '🤩', '🥳', '💪', '🎉', '🌟', '✨', '🚀']
+const GOOD_EMOJIS = ['😊', '🙂', '🌸', '🌻', '🌞']
+const CALM_EMOJIS = ['😌', '🧘', '🕊️', '☕', '🌤️']
+
 /**
  * Parses a check-in status string and categorizes it into a 1–5 wellbeing scale.
  * Prioritizes negations and distress signals to avoid false positives in health contexts.
@@ -89,7 +95,7 @@ export function parseMood(status = '') {
     s.includes('poor') ||
     s.includes('struggling') ||
     s.includes('heartbroken') ||
-    /[😔😢😭🤒🤕💔😞😟😰😿]/u.test(s)
+    DISTRESS_EMOJIS.some((e) => s.includes(e))
 
   if (isNegationOrDistress) {
     return MOOD_LEVELS[1]
@@ -107,7 +113,7 @@ export function parseMood(status = '') {
     s.includes('sluggish') ||
     s.includes('weak') ||
     s.includes('drowsy') ||
-    /[😴🥱😮‍💨😪]/u.test(s)
+    TIRED_EMOJIS.some((e) => s.includes(e))
 
   if (isTired) {
     return MOOD_LEVELS[2]
@@ -126,7 +132,7 @@ export function parseMood(status = '') {
     s.includes('blessed') ||
     s.includes('excellent') ||
     s.includes('superb') ||
-    /[😄😃🤩🥳💪🎉🌟✨🚀]/u.test(s)
+    GREAT_EMOJIS.some((e) => s.includes(e))
 
   if (isGreat) {
     return MOOD_LEVELS[5]
@@ -143,7 +149,7 @@ export function parseMood(status = '') {
     s.includes('pleasant') ||
     s.includes('doing well') ||
     s.includes('bright') ||
-    /[😊🙂🌸🌻🌞]/u.test(s)
+    GOOD_EMOJIS.some((e) => s.includes(e))
 
   if (isGood) {
     return MOOD_LEVELS[4]
@@ -160,7 +166,7 @@ export function parseMood(status = '') {
     s.includes('quiet') ||
     s.includes('steady') ||
     s.includes('normal') ||
-    /[😌🧘🕊️☕🌤️]/u.test(s)
+    CALM_EMOJIS.some((e) => s.includes(e))
 
   if (isCalm) {
     return MOOD_LEVELS[3]
