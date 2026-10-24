@@ -111,7 +111,9 @@ export default function App() {
         fetch(`${API_BASE}/api/users?familyGroupId=${activeFamilyGroupId}`).then((r) =>
           r.ok ? r.json() : null
         ),
-        fetch(`${API_BASE}/api/alerts`).then((r) => (r.ok ? r.json() : null)),
+        fetch(
+          `${API_BASE}/api/alerts?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}`
+        ).then((r) => (r.ok ? r.json() : null)),
       ])
 
       if (dashRes && dashRes.success) {
@@ -237,10 +239,10 @@ export default function App() {
 
     socket.on('alert:new', (newAlert) => {
       // Ignore alerts for different family groups
-      if (
-        newAlert.user?.familyGroupId &&
-        newAlert.user.familyGroupId !== activeFamilyGroupId
-      ) {
+      const alertFamilyGroupId =
+        newAlert.user?.familyGroupId ||
+        users.find((u) => u.id === newAlert.userId)?.familyGroupId
+      if (alertFamilyGroupId && alertFamilyGroupId !== activeFamilyGroupId) {
         return
       }
 
@@ -283,9 +285,13 @@ export default function App() {
     })
 
     const handleAlertUpdated = (updatedAlert) => {
-      setAlerts((prev) =>
-        prev.map((a) => (a.id === updatedAlert.id ? { ...a, ...updatedAlert } : a))
-      )
+      setAlerts((prev) => {
+        const existing = prev.find((a) => a.id === updatedAlert.id)
+        if (existing && existing.status === updatedAlert.status) {
+          return prev
+        }
+        return prev.map((a) => (a.id === updatedAlert.id ? { ...a, ...updatedAlert } : a))
+      })
       if (updatedAlert.status === 'RESOLVED') {
         setDashboardSeniors((prevSeniors) =>
           prevSeniors.map((senior) => {
@@ -293,10 +299,14 @@ export default function App() {
               const remaining = (senior.activeAlerts || []).filter(
                 (a) => a.id !== updatedAlert.id
               )
+              const hasAlerts = remaining.length > 0
+              const isSafe = senior.isCheckedInRecently && !hasAlerts
               return {
                 ...senior,
                 activeAlerts: remaining,
-                hasActiveAlerts: remaining.length > 0,
+                hasActiveAlerts: hasAlerts,
+                status: isSafe ? 'GREEN' : 'RED',
+                statusColor: isSafe ? 'green' : 'red',
               }
             }
             return senior
@@ -528,10 +538,14 @@ export default function App() {
         setDashboardSeniors((prevSeniors) =>
           prevSeniors.map((senior) => {
             const remaining = (senior.activeAlerts || []).filter((a) => a.id !== alertId)
+            const hasAlerts = remaining.length > 0
+            const isSafe = senior.isCheckedInRecently && !hasAlerts
             return {
               ...senior,
               activeAlerts: remaining,
-              hasActiveAlerts: remaining.length > 0,
+              hasActiveAlerts: hasAlerts,
+              status: isSafe ? 'GREEN' : 'RED',
+              statusColor: isSafe ? 'green' : 'red',
             }
           })
         )
@@ -547,9 +561,14 @@ export default function App() {
     }
   }
 
-  const activeNoCheckInAlerts = alerts.filter(
-    (a) => a.type === 'NO_CHECKIN' && a.status === 'ACTIVE'
-  )
+  const activeNoCheckInAlerts = alerts.filter((a) => {
+    if (a.type !== 'NO_CHECKIN' || a.status !== 'ACTIVE') return false
+    const alertFamilyGroupId =
+      a.user?.familyGroupId ||
+      users.find((u) => u.id === a.userId)?.familyGroupId ||
+      dashboardSeniors.find((s) => s.id === a.userId)?.familyGroupId
+    return !alertFamilyGroupId || alertFamilyGroupId === activeFamilyGroupId
+  })
 
   const getTypeBadgeClass = (type) => {
     switch (type) {
@@ -1054,6 +1073,7 @@ export default function App() {
                   const seniorName =
                     alertItem.user?.name ||
                     users.find((u) => u.id === alertItem.userId)?.name ||
+                    dashboardSeniors.find((s) => s.id === alertItem.userId)?.name ||
                     seniorUser.name ||
                     'Senior'
                   return (
@@ -1063,10 +1083,7 @@ export default function App() {
                       role="alert"
                       className="p-4 sm:p-5 rounded-2xl bg-red-600 text-white shadow-lg animate-fade-in flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-2 border-red-700"
                     >
-                      <div className="flex items-center space-x-3.5">
-                        <span className="text-3xl select-none" role="img" aria-label="warning">
-                          ⚠️
-                        </span>
+                      <div className="flex items-start sm:items-center space-x-3.5">
                         <div>
                           <div className="font-extrabold text-base sm:text-lg tracking-tight">
                             ⚠️ No check-in for {seniorName}
