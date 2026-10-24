@@ -82,6 +82,7 @@ app.get('/', (req, res) => {
       checkin: 'POST /api/checkin',
       checkins: 'GET /api/checkins, POST /api/checkins',
       alerts: 'GET /api/alerts, POST /api/alerts, PATCH /api/alerts/:id',
+      sos: 'POST /api/sos',
     },
   })
 })
@@ -446,6 +447,75 @@ app.post('/api/alerts', async (req, res) => {
     res.status(201).json({ success: true, data: alert })
   } catch (error) {
     console.error('Error creating alert:', error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
+// POST /api/sos: creates Alert (type SOS, high priority), emits 'alert:sos' immediately (no cron delay)
+app.post('/api/sos', async (req, res) => {
+  try {
+    const { userId } = req.body
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required',
+      })
+    }
+
+    const trimmedUserId = userId.trim()
+    const user = await prisma.user.findUnique({
+      where: { id: trimmedUserId },
+    })
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: `User with id '${trimmedUserId}' not found`,
+      })
+    }
+
+    const alert = await prisma.alert.create({
+      data: {
+        userId: user.id,
+        type: 'SOS',
+        status: 'ACTIVE',
+        timestamp: new Date(),
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            role: true,
+            phone: true,
+            familyGroupId: true,
+          },
+        },
+      },
+    })
+
+    const alertPayload = {
+      ...alert,
+      priority: 'HIGH',
+    }
+
+    // Emit Socket.io 'alert:sos' immediately (no cron delay) to senior's familyGroupId room
+    if (user.familyGroupId) {
+      io.to(user.familyGroupId).emit('alert:sos', alertPayload)
+      io.to(user.familyGroupId).emit('alert:new', alertPayload)
+    } else {
+      io.emit('alert:sos', alertPayload)
+      io.emit('alert:new', alertPayload)
+    }
+
+    clearAlertResolution(user.id)
+
+    res.status(201).json({
+      success: true,
+      data: alertPayload,
+    })
+  } catch (error) {
+    console.error('Error creating SOS alert:', error)
     res.status(500).json({ success: false, error: error.message })
   }
 })

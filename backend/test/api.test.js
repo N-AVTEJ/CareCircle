@@ -495,6 +495,9 @@ test('GET /api/dashboard/:familyGroupId returns latest check-in status per senio
   const { data: users } = await usersRes.json()
   const senior = users.find((u) => u.role === 'SENIOR')
 
+  // Clear any active alerts so senior can achieve GREEN safe status with fresh check-in
+  await prisma.alert.deleteMany({ where: { userId: senior.id, status: 'ACTIVE' } })
+
   // Post a fresh check-in to ensure a recent check-in exists
   await fetch(`${baseUrl}/api/checkin`, {
     method: 'POST',
@@ -1068,6 +1071,168 @@ test('checkSeniorCheckIns respects post-resolution cooldown to prevent immediate
     await prisma.checkIn.deleteMany({ where: { userId: senior.id } })
     await prisma.user.deleteMany({ where: { id: senior.id } })
   }
+})
+
+test('POST /api/sos creates SOS Alert with high priority, emits alert:sos immediately, and persists to DB', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  // Set up socket listener for room
+  const socketClient = Client(baseUrl, {
+    query: { familyGroupId: senior.familyGroupId },
+    transports: ['websocket'],
+  })
+  await new Promise((resolve) => socketClient.on('connect', resolve))
+
+  const sosEventPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timed out waiting for alert:sos event')), 4000)
+    socketClient.on('alert:sos', (payload) => {
+      clearTimeout(timeout)
+      resolve(payload)
+    })
+  })
+
+  const newAlertEventPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timed out waiting for alert:new event')), 4000)
+    socketClient.on('alert:new', (payload) => {
+      clearTimeout(timeout)
+      resolve(payload)
+    })
+  })
+
+  const res = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: senior.id }),
+  })
+  assert.equal(res.status, 201)
+  const json = await res.json()
+
+  assert.equal(json.success, true)
+  assert.equal(json.data.type, 'SOS')
+  assert.equal(json.data.status, 'ACTIVE')
+  assert.equal(json.data.priority, 'HIGH')
+  assert.equal(json.data.userId, senior.id)
+  assert.ok(json.data.user)
+  assert.equal(json.data.user.name, senior.name)
+  assert.equal(json.data.user.phone, senior.phone)
+
+  // Verify Socket.io alert:sos received immediately
+  const sosEvent = await sosEventPromise
+  assert.equal(sosEvent.id, json.data.id)
+  assert.equal(sosEvent.type, 'SOS')
+  assert.equal(sosEvent.priority, 'HIGH')
+
+  // Verify Socket.io alert:new also received
+  const newAlertEvent = await newAlertEventPromise
+  assert.equal(newAlertEvent.id, json.data.id)
+
+  // Verify DB persistence
+  const dbAlert = await prisma.alert.findUnique({
+    where: { id: json.data.id },
+  })
+  assert.ok(dbAlert)
+  assert.equal(dbAlert.type, 'SOS')
+  assert.equal(dbAlert.status, 'ACTIVE')
+  assert.equal(dbAlert.userId, senior.id)
+
+  socketClient.disconnect()
+  // Clean up created alert
+  await prisma.alert.delete({ where: { id: json.data.id } })
+})
+
+test('POST /api/sos emits alert:sos only to the senior family group room and not unrelated rooms', async () => {
+  const targetGroup = `target_group_${Date.now()}`
+  const unrelatedGroup = `unrelated_group_${Date.now()}`
+
+  const targetSenior = await prisma.user.create({
+    data: {
+      name: 'Target SOS Senior',
+      role: 'SENIOR',
+      phone: '+1-555-9001',
+      familyGroupId: targetGroup,
+    },
+  })
+
+  const targetSocket = Client(baseUrl, {
+    query: { familyGroupId: targetGroup },
+    transports: ['websocket'],
+  })
+  const unrelatedSocket = Client(baseUrl, {
+    query: { familyGroupId: unrelatedGroup },
+    transports: ['websocket'],
+  })
+
+  await Promise.all([
+    new Promise((resolve) => targetSocket.on('connect', resolve)),
+    new Promise((resolve) => unrelatedSocket.on('connect', resolve)),
+  ])
+
+  let unrelatedReceived = false
+  unrelatedSocket.on('alert:sos', () => {
+    unrelatedReceived = true
+  })
+
+  const targetReceivedPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timed out waiting for target alert:sos')), 4000)
+    targetSocket.on('alert:sos', (payload) => {
+      clearTimeout(timeout)
+      resolve(payload)
+    })
+  })
+
+  const res = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: targetSenior.id }),
+  })
+  assert.equal(res.status, 201)
+  const json = await res.json()
+
+  const received = await targetReceivedPromise
+  assert.equal(received.id, json.data.id)
+
+  await new Promise((r) => setTimeout(r, 100))
+  assert.equal(unrelatedReceived, false, 'Unrelated room must NOT receive the alert:sos event')
+
+  targetSocket.disconnect()
+  unrelatedSocket.disconnect()
+  await prisma.alert.deleteMany({ where: { userId: targetSenior.id } })
+  await prisma.user.delete({ where: { id: targetSenior.id } })
+})
+
+test('POST /api/sos rejects missing or empty userId with 400', async () => {
+  const res1 = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  assert.equal(res1.status, 400)
+  const json1 = await res1.json()
+  assert.equal(json1.success, false)
+  assert.ok(json1.error.includes('userId is required'))
+
+  const res2 = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: '   ' }),
+  })
+  assert.equal(res2.status, 400)
+  const json2 = await res2.json()
+  assert.equal(json2.success, false)
+})
+
+test('POST /api/sos rejects non-existent userId with 404', async () => {
+  const res = await fetch(`${baseUrl}/api/sos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: 'non-existent-user-uuid-9999' }),
+  })
+  assert.equal(res.status, 404)
+  const json = await res.json()
+  assert.equal(json.success, false)
+  assert.ok(json.error.includes('not found'))
 })
 
 
