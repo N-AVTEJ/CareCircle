@@ -75,6 +75,7 @@ export default function App() {
   const [dashboardSeniors, setDashboardSeniors] = useState([])
   const [checkIns, setCheckIns] = useState([])
   const [alerts, setAlerts] = useState([])
+  const [resolvingAlertId, setResolvingAlertId] = useState(null)
   const [loading, setLoading] = useState(true)
   const [isLive, setIsLive] = useState(false)
   const [socketConnected, setSocketConnected] = useState(false)
@@ -233,6 +234,79 @@ export default function App() {
         timestamp: newCheckIn.timestamp || new Date().toISOString(),
       })
     })
+
+    socket.on('alert:new', (newAlert) => {
+      // Ignore alerts for different family groups
+      if (
+        newAlert.user?.familyGroupId &&
+        newAlert.user.familyGroupId !== activeFamilyGroupId
+      ) {
+        return
+      }
+
+      // Add or update alert in alerts list
+      setAlerts((prev) => {
+        if (prev.some((a) => a.id === newAlert.id)) {
+          return prev.map((a) => (a.id === newAlert.id ? newAlert : a))
+        }
+        return [newAlert, ...prev]
+      })
+
+      // Update senior's status to RED and activeAlerts
+      setDashboardSeniors((prevSeniors) =>
+        prevSeniors.map((senior) => {
+          if (senior.id === newAlert.userId) {
+            const existing = senior.activeAlerts || []
+            const updated = existing.some((a) => a.id === newAlert.id)
+              ? existing.map((a) => (a.id === newAlert.id ? newAlert : a))
+              : [newAlert, ...existing]
+            return {
+              ...senior,
+              status: 'RED',
+              statusColor: 'red',
+              hasActiveAlerts: true,
+              activeAlerts: updated,
+            }
+          }
+          return senior
+        })
+      )
+
+      // Live event notification
+      setLastLiveEvent({
+        id: newAlert.id,
+        type: `ALERT_${newAlert.type}`,
+        status: newAlert.type === 'NO_CHECKIN' ? 'No Check-In' : newAlert.type,
+        seniorName: newAlert.user?.name || 'Senior',
+        timestamp: newAlert.timestamp || new Date().toISOString(),
+      })
+    })
+
+    const handleAlertUpdated = (updatedAlert) => {
+      setAlerts((prev) =>
+        prev.map((a) => (a.id === updatedAlert.id ? { ...a, ...updatedAlert } : a))
+      )
+      if (updatedAlert.status === 'RESOLVED') {
+        setDashboardSeniors((prevSeniors) =>
+          prevSeniors.map((senior) => {
+            if (senior.id === updatedAlert.userId) {
+              const remaining = (senior.activeAlerts || []).filter(
+                (a) => a.id !== updatedAlert.id
+              )
+              return {
+                ...senior,
+                activeAlerts: remaining,
+                hasActiveAlerts: remaining.length > 0,
+              }
+            }
+            return senior
+          })
+        )
+      }
+    }
+
+    socket.on('alert:resolved', handleAlertUpdated)
+    socket.on('alert:updated', handleAlertUpdated)
 
     return () => {
       socket.disconnect()
@@ -438,6 +512,9 @@ export default function App() {
   }
 
   const handleResolveAlert = async (alertId) => {
+    if (!alertId) return
+    setResolvingAlertId(alertId)
+    setErrorMsg(null)
     try {
       const res = await fetch(`${API_BASE}/api/alerts/${alertId}`, {
         method: 'PATCH',
@@ -445,6 +522,19 @@ export default function App() {
         body: JSON.stringify({ status: 'RESOLVED' }),
       })
       if (res.ok) {
+        setAlerts((prev) =>
+          prev.map((a) => (a.id === alertId ? { ...a, status: 'RESOLVED' } : a))
+        )
+        setDashboardSeniors((prevSeniors) =>
+          prevSeniors.map((senior) => {
+            const remaining = (senior.activeAlerts || []).filter((a) => a.id !== alertId)
+            return {
+              ...senior,
+              activeAlerts: remaining,
+              hasActiveAlerts: remaining.length > 0,
+            }
+          })
+        )
         await loadData()
       } else {
         const err = await res.json()
@@ -452,8 +542,14 @@ export default function App() {
       }
     } catch {
       setErrorMsg('Failed to connect to backend server')
+    } finally {
+      setResolvingAlertId(null)
     }
   }
+
+  const activeNoCheckInAlerts = alerts.filter(
+    (a) => a.type === 'NO_CHECKIN' && a.status === 'ACTIVE'
+  )
 
   const getTypeBadgeClass = (type) => {
     switch (type) {
@@ -951,6 +1047,50 @@ export default function App() {
               </div>
             )}
 
+            {/* Red Alert Banner for Missed Senior Check-In ('alert:new' event) */}
+            {activeNoCheckInAlerts.length > 0 && (
+              <div data-testid="no-checkin-alerts-container" className="space-y-3">
+                {activeNoCheckInAlerts.map((alertItem) => {
+                  const seniorName =
+                    alertItem.user?.name ||
+                    users.find((u) => u.id === alertItem.userId)?.name ||
+                    seniorUser.name ||
+                    'Senior'
+                  return (
+                    <div
+                      key={alertItem.id}
+                      data-testid="no-checkin-alert-banner"
+                      role="alert"
+                      className="p-4 sm:p-5 rounded-2xl bg-red-600 text-white shadow-lg animate-fade-in flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-2 border-red-700"
+                    >
+                      <div className="flex items-center space-x-3.5">
+                        <span className="text-3xl select-none" role="img" aria-label="warning">
+                          ⚠️
+                        </span>
+                        <div>
+                          <div className="font-extrabold text-base sm:text-lg tracking-tight">
+                            ⚠️ No check-in for {seniorName}
+                          </div>
+                          <p className="text-xs sm:text-sm text-red-100 mt-0.5">
+                            Safety check-in window exceeded ({formatCheckInTime(alertItem.timestamp)}). Please reach out to verify their wellbeing.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        data-testid="mark-resolved-button"
+                        onClick={() => handleResolveAlert(alertItem.id)}
+                        disabled={resolvingAlertId === alertItem.id}
+                        className="bg-white hover:bg-red-50 text-red-700 hover:text-red-900 font-extrabold text-xs sm:text-sm px-4 py-2.5 rounded-xl shadow-xs transition-colors cursor-pointer shrink-0"
+                      >
+                        {resolvingAlertId === alertItem.id ? 'Marking Resolved...' : 'Mark Resolved'}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
             {/* ========================================================== */}
             {/* SENIOR CHECK-IN STATUS CARDS (GREEN / RED)                 */}
             {/* ========================================================== */}
@@ -1373,9 +1513,10 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => handleResolveAlert(alert.id)}
+                              disabled={resolvingAlertId === alert.id}
                               className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-medium text-xs px-3 py-1.5 rounded-lg shadow-2xs transition-colors cursor-pointer"
                             >
-                              Resolve
+                              {resolvingAlertId === alert.id ? 'Marking Resolved...' : 'Mark Resolved'}
                             </button>
                           )}
                         </div>
