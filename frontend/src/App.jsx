@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { io } from 'socket.io-client'
+import { motion, AnimatePresence } from 'motion/react'
 import MoodTrendView from './components/MoodTrendView.jsx'
 
 const API_BASE = ''
@@ -72,6 +73,11 @@ export default function App() {
     return HARDCODED_SENIOR_USER_ID
   })
 
+  const selectedSeniorIdRef = useRef(selectedSeniorId)
+  useEffect(() => {
+    selectedSeniorIdRef.current = selectedSeniorId
+  }, [selectedSeniorId])
+
   const [users, setUsers] = useState([])
   const usersRef = useRef(users)
   useEffect(() => {
@@ -123,7 +129,7 @@ export default function App() {
           `${API_BASE}/api/alerts?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}`
         ).then((r) => (r.ok ? r.json() : null)),
         fetch(
-          `${API_BASE}/api/checkins?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}&type=MOOD&limit=7`
+          `${API_BASE}/api/checkins?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}${selectedSeniorId ? `&userId=${encodeURIComponent(selectedSeniorId)}` : ''}&type=MOOD&limit=7`
         ).then((r) => (r.ok ? r.json() : null)),
       ])
 
@@ -151,7 +157,7 @@ export default function App() {
       setLoading(false)
       setMoodLoading(false)
     }
-  }, [activeFamilyGroupId])
+  }, [activeFamilyGroupId, selectedSeniorId])
 
   // Initial load
   useEffect(() => {
@@ -201,8 +207,11 @@ export default function App() {
         return [newCheckIn, ...prev]
       })
 
-      // 1b. If MOOD check-in, update mood trend state (keep last 7)
-      if (newCheckIn.type === 'MOOD') {
+      // 1b. If MOOD check-in for this senior, update mood trend state (keep last 7)
+      if (
+        newCheckIn.type === 'MOOD' &&
+        (!selectedSeniorIdRef.current || newCheckIn.userId === selectedSeniorIdRef.current)
+      ) {
         setMoodCheckIns((prev) => {
           if (prev.some((m) => m.id === newCheckIn.id)) return prev
           return [newCheckIn, ...prev].slice(0, 7)
@@ -938,26 +947,40 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => handleViewSelect('SENIOR')}
-                className={`min-h-[48px] px-3 sm:px-5 py-2 text-xs sm:text-sm font-black rounded-xl transition-all duration-200 cursor-pointer flex items-center justify-center gap-1.5 tactile-button ${
+                className={`relative z-10 min-h-[56px] sm:min-h-[48px] px-3 sm:px-5 py-2 text-xs sm:text-sm font-black rounded-xl transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
                   activeView === 'SENIOR'
-                    ? 'bg-white text-emerald-950 shadow-md border border-emerald-300 scale-[1.02]'
+                    ? 'text-emerald-950 font-black'
                     : 'text-slate-700 hover:text-slate-950'
                 }`}
               >
-                <span className="text-base">👵</span>
-                <span>Senior View</span>
+                {activeView === 'SENIOR' && (
+                  <motion.div
+                    layoutId="app-header-view-pill"
+                    className="absolute inset-0 bg-white rounded-xl shadow-md border border-emerald-300"
+                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                  />
+                )}
+                <span className="relative z-10 text-base">👵</span>
+                <span className="relative z-10">Senior View</span>
               </button>
               <button
                 type="button"
                 onClick={() => handleViewSelect('FAMILY')}
-                className={`min-h-[48px] px-3 sm:px-5 py-2 text-xs sm:text-sm font-black rounded-xl transition-all duration-200 cursor-pointer flex items-center justify-center gap-1.5 tactile-button ${
+                className={`relative z-10 min-h-[56px] sm:min-h-[48px] px-3 sm:px-5 py-2 text-xs sm:text-sm font-black rounded-xl transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
                   activeView === 'FAMILY'
-                    ? 'bg-white text-emerald-950 shadow-md border border-emerald-300 scale-[1.02]'
+                    ? 'text-emerald-950 font-black'
                     : 'text-slate-700 hover:text-slate-950'
                 }`}
               >
-                <span className="text-base">👨‍👩‍👦</span>
-                <span>Family Dashboard</span>
+                {activeView === 'FAMILY' && (
+                  <motion.div
+                    layoutId="app-header-view-pill"
+                    className="absolute inset-0 bg-white rounded-xl shadow-md border border-emerald-300"
+                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                  />
+                )}
+                <span className="relative z-10 text-base">👨‍👩‍👦</span>
+                <span className="relative z-10">Family Dashboard</span>
               </button>
             </div>
           </div>
@@ -1010,7 +1033,7 @@ export default function App() {
                           key={s.id}
                           type="button"
                           onClick={() => setSelectedSeniorId(s.id)}
-                          className={`min-h-[48px] px-4 py-2 rounded-xl text-xs sm:text-sm font-black border-2 transition-all cursor-pointer tactile-button ${
+                          className={`min-h-[60px] px-5 py-3 rounded-2xl text-xs sm:text-sm font-black border-2 transition-all cursor-pointer tactile-button flex items-center justify-center ${
                             s.id === seniorUser.id
                               ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
                               : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
@@ -1035,51 +1058,59 @@ export default function App() {
               </div>
             </div>
 
-            {/* Check-In / SOS Feedback Toast */}
-            {checkInFeedback && (
-              <div
-                data-testid="checkin-feedback"
-                className={`p-4 sm:p-5 rounded-2xl border-2 shadow-sm animate-fade-in flex items-center justify-between ${
-                  checkInFeedback.type === 'SOS'
-                    ? 'bg-red-50 border-red-500 text-red-950 ring-2 ring-red-200'
-                    : 'bg-emerald-50 border-emerald-400 text-emerald-900'
-                }`}
-              >
-                <div className="flex items-center space-x-3">
-                  <span className="text-3xl select-none">
-                    {checkInFeedback.type === 'SOS' ? '🚨' : '✅'}
-                  </span>
-                  <div>
-                    <div
-                      className={`font-black text-base sm:text-lg ${
-                        checkInFeedback.type === 'SOS' ? 'text-red-950' : 'text-emerald-950'
-                      }`}
-                    >
-                      {checkInFeedback.title}
-                    </div>
-                    <div
-                      className={`text-xs sm:text-sm ${
-                        checkInFeedback.type === 'SOS'
-                          ? 'text-red-800 font-medium'
-                          : 'text-emerald-800 font-medium'
-                      }`}
-                    >
-                      {checkInFeedback.message}
-                    </div>
-                  </div>
-                </div>
-                <button
-                  onClick={() => setCheckInFeedback(null)}
-                  className={`font-black px-4 py-2.5 min-h-[48px] text-sm rounded-xl cursor-pointer transition-colors tactile-button ${
+            {/* Check-In / SOS Feedback Toast with Motion Morphing Entrance */}
+            <AnimatePresence>
+              {checkInFeedback && (
+                <motion.div
+                  key="checkin-feedback-toast"
+                  initial={{ opacity: 0, y: -20, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -20, scale: 0.96 }}
+                  transition={{ type: 'spring', stiffness: 450, damping: 28 }}
+                  data-testid="checkin-feedback"
+                  className={`p-4 sm:p-5 rounded-2xl border-2 shadow-sm flex items-center justify-between ${
                     checkInFeedback.type === 'SOS'
-                      ? 'text-red-900 hover:text-red-950 bg-red-100 hover:bg-red-200 border border-red-300'
-                      : 'text-emerald-900 hover:text-emerald-950 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300'
+                      ? 'bg-red-50 border-red-500 text-red-950 ring-2 ring-red-200'
+                      : 'bg-emerald-50 border-emerald-400 text-emerald-900'
                   }`}
                 >
-                  Dismiss
-                </button>
-              </div>
-            )}
+                  <div className="flex items-center space-x-3">
+                    <span className="text-3xl select-none">
+                      {checkInFeedback.type === 'SOS' ? '🚨' : '✅'}
+                    </span>
+                    <div>
+                      <div
+                        className={`font-black text-base sm:text-lg ${
+                          checkInFeedback.type === 'SOS' ? 'text-red-950' : 'text-emerald-950'
+                        }`}
+                      >
+                        {checkInFeedback.title}
+                      </div>
+                      <div
+                        className={`text-xs sm:text-sm ${
+                          checkInFeedback.type === 'SOS'
+                            ? 'text-red-800 font-medium'
+                            : 'text-emerald-800 font-medium'
+                        }`}
+                      >
+                        {checkInFeedback.message}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCheckInFeedback(null)}
+                    className={`font-black px-5 py-3 min-h-[60px] text-sm rounded-xl cursor-pointer transition-colors tactile-button flex items-center justify-center shrink-0 ${
+                      checkInFeedback.type === 'SOS'
+                        ? 'text-red-900 hover:text-red-950 bg-red-100 hover:bg-red-200 border border-red-300'
+                        : 'text-emerald-900 hover:text-emerald-950 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300'
+                    }`}
+                  >
+                    Dismiss
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Active SOS Emergency Notice for Senior */}
             {activeSosAlerts.some((a) => a.userId === seniorUser.id) && (
@@ -1116,12 +1147,15 @@ export default function App() {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                 {/* 1. PILLS BUTTON */}
-                <button
+                <motion.button
                   type="button"
                   data-testid="senior-button-pills"
                   aria-label="Pills Check-In"
                   onClick={() => handleSeniorCheckIn('PILLS', 'Morning medications taken')}
                   disabled={Boolean(pendingButton)}
+                  whileHover={{ scale: 1.015, y: -2 }}
+                  whileTap={{ scale: 0.96, y: 2 }}
+                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
                   className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
                     pendingButton === 'PILLS'
                       ? 'opacity-70 bg-blue-100 border-blue-500'
@@ -1152,15 +1186,18 @@ export default function App() {
                       {getLastCheckInTime('PILLS') || 'Not yet today'}
                     </span>
                   </div>
-                </button>
+                </motion.button>
 
                 {/* 2. MEAL BUTTON */}
-                <button
+                <motion.button
                   type="button"
                   data-testid="senior-button-meal"
                   aria-label="Meal Check-In"
                   onClick={() => handleSeniorCheckIn('MEAL', 'Finished a healthy meal')}
                   disabled={Boolean(pendingButton)}
+                  whileHover={{ scale: 1.015, y: -2 }}
+                  whileTap={{ scale: 0.96, y: 2 }}
+                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
                   className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
                     pendingButton === 'MEAL'
                       ? 'opacity-70 bg-emerald-100 border-emerald-500'
@@ -1191,15 +1228,18 @@ export default function App() {
                       {getLastCheckInTime('MEAL') || 'Not yet today'}
                     </span>
                   </div>
-                </button>
+                </motion.button>
 
                 {/* 3. MOOD BUTTON */}
-                <button
+                <motion.button
                   type="button"
                   data-testid="senior-button-mood"
                   aria-label="Mood Check-In"
                   onClick={() => handleSeniorCheckIn('MOOD', 'Feeling good and cheerful')}
                   disabled={Boolean(pendingButton)}
+                  whileHover={{ scale: 1.015, y: -2 }}
+                  whileTap={{ scale: 0.96, y: 2 }}
+                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
                   className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
                     pendingButton === 'MOOD'
                       ? 'opacity-70 bg-purple-100 border-purple-500'
@@ -1230,7 +1270,7 @@ export default function App() {
                       {getLastCheckInTime('MOOD') || 'Not yet today'}
                     </span>
                   </div>
-                </button>
+                </motion.button>
               </div>
             </div>
 
@@ -1256,12 +1296,15 @@ export default function App() {
                   </div>
                 </div>
 
-                <button
+                <motion.button
                   type="button"
                   data-testid="senior-sos-button"
                   aria-label="Emergency SOS"
                   onClick={() => setShowSosConfirmDialog(true)}
                   disabled={submittingAlert}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.95 }}
+                  transition={{ type: 'spring', stiffness: 450, damping: 25 }}
                   className="w-full md:w-auto shrink-0 bg-gradient-to-r from-red-600 via-rose-600 to-red-700 hover:from-red-700 hover:to-rose-800 active:scale-95 text-white font-black text-lg sm:text-xl px-8 py-5 rounded-3xl shadow-xl hover:shadow-2xl border-3 border-red-400 cursor-pointer transition-all duration-150 flex items-center justify-center gap-3.5 ring-4 ring-red-300 min-h-[72px] sm:min-h-[80px] tactile-button"
                 >
                   <span className="text-3xl sm:text-4xl select-none animate-bounce">🚨</span>
@@ -1273,92 +1316,103 @@ export default function App() {
                       Tap to notify family caregiver
                     </div>
                   </div>
-                </button>
+                </motion.button>
               </div>
             </div>
 
-            {/* Confirmation Dialog before firing SOS alert */}
-            {showSosConfirmDialog && (
-              <div
-                data-testid="sos-confirm-dialog"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="sos-confirm-title"
-                onClick={(e) => {
-                  if (e.target === e.currentTarget && !submittingAlert) {
-                    setShowSosConfirmDialog(false)
-                  }
-                }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fade-in"
-              >
-                <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border-4 border-red-500 space-y-6 text-center">
-                  <div className="w-20 h-20 mx-auto rounded-3xl bg-red-100 border-4 border-red-300 flex items-center justify-center text-4xl shadow-inner">
-                    🚨
-                  </div>
-
-                  <div className="space-y-2">
-                    <h3
-                      id="sos-confirm-title"
-                      className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight"
-                    >
-                      Send Emergency SOS Alert?
-                    </h3>
-                    <p className="text-slate-700 text-sm sm:text-base leading-relaxed font-medium">
-                      Are you sure you want to send an emergency SOS alert? This will immediately notify your
-                      family caregiver{' '}
-                      <strong className="text-slate-950 font-black">{familyUser.name}</strong> ({familyUser.phone}) with high priority.
-                    </p>
-                  </div>
-
-                  <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 text-xs sm:text-sm text-amber-950 font-bold">
-                    ⚠️ Only send this alert if you are experiencing an emergency or need urgent help.
-                  </div>
-
-                  {errorMsg && (
-                    <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-3.5 text-xs sm:text-sm text-red-900 font-black">
-                      ⚠️ {errorMsg}
+            {/* Confirmation Dialog before firing SOS alert with Motion Spring Dialog */}
+            <AnimatePresence>
+              {showSosConfirmDialog && (
+                <motion.div
+                  data-testid="sos-confirm-dialog"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="sos-confirm-title"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget && !submittingAlert) {
+                      setShowSosConfirmDialog(false)
+                    }
+                  }}
+                  className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm"
+                >
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.92, y: 20 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.92, y: 20 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                    className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border-4 border-red-500 space-y-6 text-center"
+                  >
+                    <div className="w-20 h-20 mx-auto rounded-3xl bg-red-100 border-4 border-red-300 flex items-center justify-center text-4xl shadow-inner">
+                      🚨
                     </div>
-                  )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                    <button
-                      type="button"
-                      data-testid="cancel-sos-button"
-                      onClick={() => setShowSosConfirmDialog(false)}
-                      disabled={submittingAlert}
-                      className={`w-full min-h-[60px] py-4 px-5 rounded-2xl border-2 border-slate-300 text-slate-800 font-black text-base sm:text-lg transition-colors tactile-button ${
-                        submittingAlert
-                          ? 'opacity-50 cursor-not-allowed'
-                          : 'hover:bg-slate-100 cursor-pointer'
-                      }`}
-                    >
-                      Cancel
-                    </button>
+                    <div className="space-y-2">
+                      <h3
+                        id="sos-confirm-title"
+                        className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight"
+                      >
+                        Send Emergency SOS Alert?
+                      </h3>
+                      <p className="text-slate-700 text-sm sm:text-base leading-relaxed font-medium">
+                        Are you sure you want to send an emergency SOS alert? This will immediately notify your
+                        family caregiver{' '}
+                        <strong className="text-slate-950 font-black">{familyUser.name}</strong> ({familyUser.phone}) with high priority.
+                      </p>
+                    </div>
 
-                    <button
-                      type="button"
-                      data-testid="confirm-sos-button"
-                      onClick={handleTriggerSos}
-                      disabled={submittingAlert}
-                      className={`w-full min-h-[60px] py-4 px-5 rounded-2xl bg-red-600 text-white font-black text-base sm:text-lg shadow-xl transition-all flex items-center justify-center gap-2 tactile-button ${
-                        submittingAlert
-                          ? 'opacity-70 cursor-wait'
-                          : 'hover:bg-red-700 active:scale-95 cursor-pointer ring-2 ring-red-400'
-                      }`}
-                    >
-                      {submittingAlert ? (
-                        'Sending...'
-                      ) : (
-                        <>
-                          <span>🚨</span>
-                          <span>Yes, Send SOS</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
+                    <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 text-xs sm:text-sm text-amber-950 font-bold">
+                      ⚠️ Only send this alert if you are experiencing an emergency or need urgent help.
+                    </div>
+
+                    {errorMsg && (
+                      <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-3.5 text-xs sm:text-sm text-red-900 font-black">
+                        ⚠️ {errorMsg}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                      <button
+                        type="button"
+                        data-testid="cancel-sos-button"
+                        onClick={() => setShowSosConfirmDialog(false)}
+                        disabled={submittingAlert}
+                        className={`w-full min-h-[60px] py-4 px-5 rounded-2xl border-2 border-slate-300 text-slate-800 font-black text-base sm:text-lg transition-colors tactile-button ${
+                          submittingAlert
+                            ? 'opacity-50 cursor-not-allowed'
+                            : 'hover:bg-slate-100 cursor-pointer'
+                        }`}
+                      >
+                        Cancel
+                      </button>
+
+                      <button
+                        type="button"
+                        data-testid="confirm-sos-button"
+                        onClick={handleTriggerSos}
+                        disabled={submittingAlert}
+                        className={`w-full min-h-[60px] py-4 px-5 rounded-2xl bg-red-600 text-white font-black text-base sm:text-lg shadow-xl transition-all flex items-center justify-center gap-2 tactile-button ${
+                          submittingAlert
+                            ? 'opacity-70 cursor-wait'
+                            : 'hover:bg-red-700 active:scale-95 cursor-pointer ring-2 ring-red-400'
+                        }`}
+                      >
+                        {submittingAlert ? (
+                          'Sending...'
+                        ) : (
+                          <>
+                            <span>🚨</span>
+                            <span>Yes, Send SOS</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </motion.div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Live Senior Activity Feed */}
             <div data-testid="senior-activity-feed" className="bg-white rounded-2xl p-6 sm:p-7 border border-slate-200 shadow-xs">
@@ -1768,11 +1822,12 @@ export default function App() {
             {/* Senior Mood Trend View: Last 7 mood check-ins (Emoji Row & Recharts line chart) */}
             <MoodTrendView
               moodCheckIns={
-                moodCheckIns.length > 0
+                (moodCheckIns.length > 0
                   ? moodCheckIns
                   : checkIns.filter((c) => c.type === 'MOOD')
+                ).filter((c) => !seniorUser.id || c.userId === seniorUser.id)
               }
-              loading={loading && moodLoading}
+              loading={loading || moodLoading}
               seniorName={seniorUser.name}
             />
 
