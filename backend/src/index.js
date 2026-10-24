@@ -1,9 +1,16 @@
 import 'dotenv/config'
 import http from 'node:http'
+import path from 'node:path'
+import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import express from 'express'
 import cors from 'cors'
 import { Server } from 'socket.io'
 import { PrismaClient } from '@prisma/client'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const frontendDist = path.resolve(__dirname, '../../frontend/dist')
 
 const app = express()
 const server = http.createServer(app)
@@ -20,24 +27,27 @@ const PORT = process.env.PORT || 5000
 app.use(cors())
 app.use(express.json())
 
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist, { index: false }))
+}
+
 // Socket.io room management for family groups
 io.on('connection', (socket) => {
-  const queryFamilyGroupId = socket.handshake.query?.familyGroupId
+  const queryFamilyGroupId =
+    socket.handshake.query?.familyGroupId || socket.handshake.auth?.familyGroupId
   if (queryFamilyGroupId) {
     socket.join(String(queryFamilyGroupId))
   }
 
-  socket.on('join', (room) => {
-    if (room) socket.join(String(room))
-  })
+  const handleJoin = (room) => {
+    if (!room) return
+    const targetRoom = typeof room === 'object' ? (room.familyGroupId || room.room || room.id) : room
+    if (targetRoom) socket.join(String(targetRoom))
+  }
 
-  socket.on('join:family', (room) => {
-    if (room) socket.join(String(room))
-  })
-
-  socket.on('join_room', (room) => {
-    if (room) socket.join(String(room))
-  })
+  socket.on('join', handleJoin)
+  socket.on('join:family', handleJoin)
+  socket.on('join_room', handleJoin)
 })
 
 // Health check endpoint
@@ -49,8 +59,11 @@ app.get('/health', (req, res) => {
   })
 })
 
-// Root route
+// Root route: serves frontend in browser, or JSON API overview for API clients
 app.get('/', (req, res) => {
+  if (fs.existsSync(path.join(frontendDist, 'index.html')) && req.headers.accept?.includes('text/html')) {
+    return res.sendFile(path.join(frontendDist, 'index.html'))
+  }
   res.json({
     message: 'Welcome to CareCircle API',
     endpoints: {
@@ -118,10 +131,20 @@ app.get('/api/users/:id', async (req, res) => {
 // Get check-ins
 app.get('/api/checkins', async (req, res) => {
   try {
-    const { userId } = req.query
+    const { userId, familyGroupId, type, limit } = req.query
+    const where = {}
+    if (userId) where.userId = String(userId)
+    if (familyGroupId) where.user = { familyGroupId: String(familyGroupId) }
+    if (type) {
+      const normalizedType = String(type).trim().toUpperCase()
+      if (ALLOWED_CHECKIN_TYPES.includes(normalizedType)) {
+        where.type = normalizedType
+      }
+    }
     const checkIns = await prisma.checkIn.findMany({
-      where: userId ? { userId: String(userId) } : undefined,
+      where,
       orderBy: { timestamp: 'desc' },
+      take: limit ? Math.min(parseInt(limit, 10) || 50, 100) : undefined,
       include: {
         user: {
           select: { id: true, name: true, role: true, familyGroupId: true },
@@ -139,14 +162,17 @@ app.get('/api/checkins', async (req, res) => {
 const handleCreateCheckIn = async (req, res) => {
   try {
     const { userId, type, status, timestamp } = req.body
-    if (!userId || !type || !status) {
+    const normalizedType = typeof type === 'string' ? type.trim().toUpperCase() : type
+    const trimmedStatus = typeof status === 'string' ? status.trim() : ''
+
+    if (!userId || !type || !trimmedStatus) {
       return res.status(400).json({
         success: false,
-        error: 'userId, type (PILLS/MEAL/MOOD), and status are required',
+        error: 'userId, type (PILLS/MEAL/MOOD), and non-empty status are required',
       })
     }
 
-    if (!ALLOWED_CHECKIN_TYPES.includes(type)) {
+    if (!ALLOWED_CHECKIN_TYPES.includes(normalizedType)) {
       return res.status(400).json({
         success: false,
         error: `Invalid check-in type '${type}'. Allowed types: ${ALLOWED_CHECKIN_TYPES.join(', ')}`,
@@ -163,9 +189,9 @@ const handleCreateCheckIn = async (req, res) => {
 
     const checkIn = await prisma.checkIn.create({
       data: {
-        userId,
-        type,
-        status: typeof status === 'string' ? status.trim() : String(status),
+        userId: String(userId),
+        type: normalizedType,
+        status: trimmedStatus,
         timestamp: timestamp ? new Date(timestamp) : new Date(),
       },
       include: {
