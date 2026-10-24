@@ -103,10 +103,13 @@ npm run dev:frontend
 npm run build
 ```
 
-### 7. Running Tests
+### 7. Running Tests & Verification
 ```bash
-# Runs full test suite (13 automated tests covering health, users, check-ins, alerts, and error cases)
+# Runs full test suite (18 automated tests covering health, users, check-ins, alerts, Socket.io room events, and validation)
 npm test
+
+# Runs standalone Senior Check-In & Socket.io Room Verification
+npm run verify:checkin
 ```
 
 ## API Endpoints
@@ -115,11 +118,18 @@ npm test
 - `GET /` - API endpoint catalog
 - `GET /api/users` - Get all users (supports `?familyGroupId=` query)
 - `GET /api/users/:id` - Get single user with recent check-ins and alerts
+- `POST /api/checkin` - Create check-in (`userId`, `type` [PILLS/MEAL/MOOD], `status`), saves to `CheckIn` table and emits `checkin:new` to `familyGroupId`'s Socket.io room
 - `GET /api/checkins` - List check-ins (supports `?userId=`)
-- `POST /api/checkins` - Create check-in (`userId`, `type` [PILLS/MEAL/MOOD], `status`, `timestamp`)
+- `POST /api/checkins` - Create check-in alias
 - `GET /api/alerts` - List alerts (supports `?userId=`, `?status=`)
 - `POST /api/alerts` - Create alert (`userId`, `type` [NO_CHECKIN/SOS], `status` [ACTIVE/RESOLVED])
 - `PATCH /api/alerts/:id` - Update alert status (`status` [ACTIVE/RESOLVED])
+
+## Real-Time Socket.io & Senior View
+
+- **Senior View (`/`)**: Displays 3 big, accessible 1-tap check-in buttons (**Pills**, **Meal**, **Mood**) for Senior user Eleanor Vance (`ffd75d01-03e9-4138-abd1-b095ac5ba212`).
+- **Real-Time Sync**: When a check-in is submitted, backend saves a row in the `CheckIn` table and immediately broadcasts a `checkin:new` event to room `fam_group_carecircle_101`. Any connected family members see the live update immediately.
+- **Family Dashboard**: Toggle view to inspect family members, active alerts, trigger SOS/missed check-ins, and resolve alerts.
 
 ## Verifying Seeded Data in Prisma Studio
 
@@ -130,4 +140,5 @@ npm test
 2. Navigate to `http://localhost:5555` in your browser.
 3. Select the **User** model to view Eleanor Vance (`SENIOR`) and David Vance (`FAMILY`) sharing `familyGroupId: fam_group_carecircle_101`.
 4. Select **CheckIn** and **Alert** to view the initial seeded events for Eleanor Vance.
+
 
