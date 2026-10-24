@@ -5,15 +5,47 @@ const API_BASE = ''
 const HARDCODED_SENIOR_USER_ID = 'ffd75d01-03e9-4138-abd1-b095ac5ba212'
 const DEFAULT_FAMILY_GROUP_ID = 'fam_group_carecircle_101'
 
+function formatCheckInTime(timestamp) {
+  if (!timestamp) return 'No check-in yet'
+  const date = new Date(timestamp)
+  if (isNaN(date.getTime())) return 'Invalid date'
+  const isToday = new Date().toDateString() === date.toDateString()
+  const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return isToday ? `Today at ${timeStr}` : `${date.toLocaleDateString()} at ${timeStr}`
+}
+
+function getRelativeTime(timestamp) {
+  if (!timestamp) return ''
+  const date = new Date(timestamp)
+  if (isNaN(date.getTime())) return ''
+  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000)
+  if (diffSec < 5) return 'Just now'
+  if (diffSec < 60) return `${diffSec}s ago`
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHours = Math.floor(diffMin / 60)
+  if (diffHours < 24) return `${diffHours}h ago`
+  return `${Math.floor(diffHours / 24)}d ago`
+}
+
 export default function App() {
-  const [activeView, setActiveView] = useState('SENIOR') // 'SENIOR' | 'FAMILY'
+  const [activeView, setActiveView] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search)
+      const v = p.get('view')?.toUpperCase()
+      if (v === 'FAMILY' || v === 'SENIOR') return v
+    }
+    return 'SENIOR'
+  })
   const [users, setUsers] = useState([])
+  const [dashboardSeniors, setDashboardSeniors] = useState([])
   const [checkIns, setCheckIns] = useState([])
   const [alerts, setAlerts] = useState([])
   const [loading, setLoading] = useState(true)
   const [isLive, setIsLive] = useState(false)
   const [socketConnected, setSocketConnected] = useState(false)
   const [errorMsg, setErrorMsg] = useState(null)
+  const [lastLiveEvent, setLastLiveEvent] = useState(null)
 
   // Senior view quick-feedback state
   const [pendingButton, setPendingButton] = useState(null) // 'PILLS' | 'MEAL' | 'MOOD' | null
@@ -25,23 +57,37 @@ export default function App() {
   const [submittingCustomCheckIn, setSubmittingCustomCheckIn] = useState(false)
   const [submittingAlert, setSubmittingAlert] = useState(false)
 
+  const handleViewSelect = (view) => {
+    setActiveView(view)
+    if (typeof window !== 'undefined' && window.history?.replaceState) {
+      const url = new URL(window.location.href)
+      url.searchParams.set('view', view.toLowerCase())
+      window.history.replaceState({}, '', url.toString())
+    }
+  }
+
   const loadData = useCallback(async () => {
     try {
-      const [uRes, cRes, aRes] = await Promise.all([
-        fetch(`${API_BASE}/api/users`).then((r) => (r.ok ? r.json() : null)),
-        fetch(`${API_BASE}/api/checkins`).then((r) => (r.ok ? r.json() : null)),
+      const [dashRes, uRes, aRes] = await Promise.all([
+        fetch(`${API_BASE}/api/dashboard/${DEFAULT_FAMILY_GROUP_ID}`).then((r) =>
+          r.ok ? r.json() : null
+        ),
+        fetch(`${API_BASE}/api/users?familyGroupId=${DEFAULT_FAMILY_GROUP_ID}`).then((r) =>
+          r.ok ? r.json() : null
+        ),
         fetch(`${API_BASE}/api/alerts`).then((r) => (r.ok ? r.json() : null)),
       ])
 
-      if (uRes && uRes.success) {
-        setUsers(uRes.data || [])
+      if (dashRes && dashRes.success) {
+        setDashboardSeniors(dashRes.data?.seniors || [])
+        setCheckIns(dashRes.data?.recentCheckIns || [])
         setIsLive(true)
       } else {
         setIsLive(false)
       }
 
-      if (cRes && cRes.success) {
-        setCheckIns(cRes.data || [])
+      if (uRes && uRes.success) {
+        setUsers(uRes.data || [])
       }
       if (aRes && aRes.success) {
         setAlerts(aRes.data || [])
@@ -71,12 +117,14 @@ export default function App() {
   useEffect(() => {
     const socket = io('/', {
       query: { familyGroupId: DEFAULT_FAMILY_GROUP_ID },
+      auth: { familyGroupId: DEFAULT_FAMILY_GROUP_ID },
       transports: ['websocket', 'polling'],
     })
 
     socket.on('connect', () => {
       setSocketConnected(true)
       socket.emit('join:family', DEFAULT_FAMILY_GROUP_ID)
+      socket.emit('join', DEFAULT_FAMILY_GROUP_ID)
     })
 
     socket.on('disconnect', () => {
@@ -84,9 +132,51 @@ export default function App() {
     })
 
     socket.on('checkin:new', (newCheckIn) => {
+      // 1. Live list of check-ins (prepend new check-in without page refresh)
       setCheckIns((prev) => {
         if (prev.some((c) => c.id === newCheckIn.id)) return prev
         return [newCheckIn, ...prev]
+      })
+
+      // 2. Status card (update senior status to GREEN and update last check-in time immediately)
+      setDashboardSeniors((prevSeniors) => {
+        if (!prevSeniors || prevSeniors.length === 0) {
+          return [
+            {
+              id: newCheckIn.userId,
+              name: newCheckIn.user?.name || 'Eleanor Vance',
+              role: 'SENIOR',
+              phone: newCheckIn.user?.phone || '+1-555-0143',
+              familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+              status: 'GREEN',
+              statusColor: 'green',
+              latestCheckIn: newCheckIn,
+              lastCheckInTime: newCheckIn.timestamp,
+              isCheckedInRecently: true,
+            },
+          ]
+        }
+        return prevSeniors.map((senior) => {
+          if (senior.id === newCheckIn.userId || senior.id === HARDCODED_SENIOR_USER_ID) {
+            return {
+              ...senior,
+              status: 'GREEN',
+              statusColor: 'green',
+              latestCheckIn: newCheckIn,
+              lastCheckInTime: newCheckIn.timestamp,
+              isCheckedInRecently: true,
+            }
+          }
+          return senior
+        })
+      })
+
+      // 3. Record live update event for UI flash / indicator
+      setLastLiveEvent({
+        id: newCheckIn.id,
+        type: newCheckIn.type,
+        status: newCheckIn.status,
+        timestamp: newCheckIn.timestamp || new Date().toISOString(),
       })
     })
 
@@ -104,13 +194,27 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [checkInFeedback])
 
+  // Auto-dismiss live event toast after 6 seconds
+  useEffect(() => {
+    if (!lastLiveEvent) return
+    const timer = setTimeout(() => {
+      setLastLiveEvent(null)
+    }, 6000)
+    return () => clearTimeout(timer)
+  }, [lastLiveEvent])
+
   // Resolved user models (using seeded data or fallback)
-  const seniorUser = users.find((u) => u.role === 'SENIOR') || {
+  const seniorFromDashboard =
+    dashboardSeniors.find((s) => s.id === HARDCODED_SENIOR_USER_ID) || dashboardSeniors[0]
+  const seniorFromUsers = users.find((u) => u.role === 'SENIOR')
+  const seniorUser = seniorFromDashboard || seniorFromUsers || {
     id: HARDCODED_SENIOR_USER_ID,
     name: 'Eleanor Vance',
     role: 'SENIOR',
     phone: '+1-555-0143',
     familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+    status: 'RED',
+    statusColor: 'red',
   }
 
   const familyUser = users.find((u) => u.role === 'FAMILY') || {
@@ -153,6 +257,36 @@ export default function App() {
             if (prev.some((c) => c.id === json.data.id)) return prev
             return [json.data, ...prev]
           })
+          setDashboardSeniors((prev) => {
+            if (!prev || prev.length === 0) {
+              return [
+                {
+                  id: json.data.userId,
+                  name: json.data.user?.name || seniorUser.name,
+                  role: 'SENIOR',
+                  phone: seniorUser.phone,
+                  familyGroupId: DEFAULT_FAMILY_GROUP_ID,
+                  status: 'GREEN',
+                  statusColor: 'green',
+                  latestCheckIn: json.data,
+                  lastCheckInTime: json.data.timestamp,
+                  isCheckedInRecently: true,
+                },
+              ]
+            }
+            return prev.map((s) =>
+              s.id === seniorId || s.id === HARDCODED_SENIOR_USER_ID
+                ? {
+                    ...s,
+                    status: 'GREEN',
+                    statusColor: 'green',
+                    latestCheckIn: json.data,
+                    lastCheckInTime: json.data.timestamp,
+                    isCheckedInRecently: true,
+                  }
+                : s
+            )
+          })
         }
       } else {
         const err = await res.json()
@@ -189,6 +323,20 @@ export default function App() {
             if (prev.some((c) => c.id === json.data.id)) return prev
             return [json.data, ...prev]
           })
+          setDashboardSeniors((prev) =>
+            prev.map((s) =>
+              s.id === seniorUser.id || s.id === HARDCODED_SENIOR_USER_ID
+                ? {
+                    ...s,
+                    status: 'GREEN',
+                    statusColor: 'green',
+                    latestCheckIn: json.data,
+                    lastCheckInTime: json.data.timestamp,
+                    isCheckedInRecently: true,
+                  }
+                : s
+            )
+          )
         }
         setCustomCheckInStatus('')
       } else {
@@ -272,6 +420,21 @@ export default function App() {
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   }
 
+  const effectiveSeniors =
+    dashboardSeniors.length > 0
+      ? dashboardSeniors
+      : [
+          {
+            ...seniorUser,
+            latestCheckIn: seniorCheckIns[0] || null,
+            lastCheckInTime: seniorCheckIns[0]?.timestamp || null,
+            status: seniorCheckIns.length > 0 ? 'GREEN' : 'RED',
+            statusColor: seniorCheckIns.length > 0 ? 'green' : 'red',
+            isCheckedInRecently: seniorCheckIns.length > 0,
+            recentCheckIns: seniorCheckIns,
+          },
+        ]
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
       {/* Top Navigation & Status Bar */}
@@ -335,8 +498,8 @@ export default function App() {
             <div className="bg-slate-100 p-1 rounded-xl flex items-center">
               <button
                 type="button"
-                onClick={() => setActiveView('SENIOR')}
-                className={`px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-all ${
+                onClick={() => handleViewSelect('SENIOR')}
+                className={`px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer ${
                   activeView === 'SENIOR'
                     ? 'bg-white text-emerald-800 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
@@ -346,8 +509,8 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setActiveView('FAMILY')}
-                className={`px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-all ${
+                onClick={() => handleViewSelect('FAMILY')}
+                className={`px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer ${
                   activeView === 'FAMILY'
                     ? 'bg-white text-emerald-800 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
@@ -642,12 +805,19 @@ export default function App() {
         {/* ============================================================== */}
         {activeView === 'FAMILY' && (
           <div className="space-y-8">
+            {/* Header banner */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
-                <h2 className="text-2xl font-bold text-slate-900">Family Caregiver Dashboard</h2>
+                <div className="inline-flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full text-xs font-bold text-emerald-800 mb-2">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  Family Caregiver Mode • Real-Time Monitor
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+                  Family Caregiver Dashboard
+                </h2>
                 <p className="text-slate-600 text-sm mt-0.5">
                   Shared Family Circle:{' '}
-                  <code className="bg-slate-200 text-slate-800 px-2 py-0.5 rounded text-xs font-mono">
+                  <code className="bg-slate-200 text-slate-800 px-2 py-0.5 rounded text-xs font-mono font-bold">
                     {seniorUser.familyGroupId}
                   </code>
                 </p>
@@ -672,58 +842,196 @@ export default function App() {
               </div>
             </div>
 
-            {/* Member Profile Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-base">
-                      EV
+            {/* Real-time live update toast (visible when Socket.io event arrives) */}
+            {lastLiveEvent && (
+              <div
+                data-testid="family-live-toast"
+                className="p-4 sm:p-5 rounded-2xl bg-emerald-600 text-white shadow-md animate-fade-in flex items-center justify-between"
+              >
+                <div className="flex items-center space-x-3">
+                  <span className="text-2xl">⚡</span>
+                  <div>
+                    <div className="font-bold text-sm sm:text-base">
+                      Live Check-In Received via Socket.io!
                     </div>
-                    <div>
-                      <h3 className="font-semibold text-slate-800">{seniorUser.name}</h3>
-                      <span className="text-xs text-slate-500">Senior Care Recipient</span>
+                    <div className="text-xs text-emerald-100 mt-0.5">
+                      [{lastLiveEvent.type}] "{lastLiveEvent.status}" received just now with no refresh.
                     </div>
                   </div>
-                  <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800">
-                    {seniorUser.role}
-                  </span>
                 </div>
-                <div className="mt-4 space-y-2 text-sm text-slate-600">
-                  <p>
-                    <span className="font-medium text-slate-700">Phone:</span> {seniorUser.phone}
-                  </p>
-                  <p>
-                    <span className="font-medium text-slate-700">User ID:</span>{' '}
-                    <span className="font-mono text-xs">{seniorUser.id}</span>
-                  </p>
+                <span className="text-xs bg-emerald-700/80 border border-emerald-400 font-mono px-3 py-1 rounded-full">
+                  Room: {DEFAULT_FAMILY_GROUP_ID}
+                </span>
+              </div>
+            )}
+
+            {/* ========================================================== */}
+            {/* SENIOR CHECK-IN STATUS CARDS (GREEN / RED)                 */}
+            {/* ========================================================== */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-xs font-bold tracking-wider text-slate-400 uppercase">
+                  Senior Check-In Status
+                </div>
+                <div className="flex items-center space-x-2 text-xs text-slate-500">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>Live Socket.io Room: <code className="font-mono text-slate-700">{DEFAULT_FAMILY_GROUP_ID}</code></span>
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-base">
-                      DV
+              <div className="space-y-4">
+                {effectiveSeniors.map((senior) => {
+                  const isGreen = senior.status === 'GREEN'
+                  const lastTime = senior.lastCheckInTime || senior.latestCheckIn?.timestamp
+
+                  return (
+                    <div
+                      key={senior.id}
+                      data-testid="senior-status-card"
+                      className={`relative overflow-hidden rounded-3xl border-3 transition-all duration-300 p-6 sm:p-8 shadow-sm ${
+                        isGreen
+                          ? 'bg-gradient-to-br from-emerald-50/90 via-white to-teal-50/40 border-emerald-400 hover:border-emerald-500 shadow-emerald-100/50'
+                          : 'bg-gradient-to-br from-rose-50/90 via-white to-amber-50/40 border-rose-400 hover:border-rose-500 shadow-rose-100/50'
+                      }`}
+                    >
+                      {/* Top row: Senior Profile + Status Badge (Green/Red) */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-200/80">
+                        <div className="flex items-center space-x-4">
+                          <div
+                            className={`w-14 h-14 rounded-2xl flex items-center justify-center font-extrabold text-xl shadow-xs select-none ${
+                              isGreen
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-rose-600 text-white'
+                            }`}
+                          >
+                            {senior.name
+                              ? senior.name
+                                  .split(' ')
+                                  .map((n) => n[0])
+                                  .join('')
+                                  .slice(0, 2)
+                              : 'EV'}
+                          </div>
+                          <div>
+                            <div className="flex items-center space-x-2">
+                              <h3 className="text-2xl font-extrabold text-slate-900 tracking-tight">
+                                {senior.name}
+                              </h3>
+                              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                                {senior.role}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-500 mt-0.5 font-medium">
+                              Phone: {senior.phone} • Care Recipient
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Status Badge (Green / Red) */}
+                        <div data-testid="senior-status-badge">
+                          {isGreen ? (
+                            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs sm:text-sm font-extrabold bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-2xs">
+                              <span className="relative flex h-3 w-3">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                              </span>
+                              <span>SAFE • CHECKED IN</span>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs sm:text-sm font-extrabold bg-rose-100 text-rose-900 border border-rose-300 shadow-2xs">
+                              <span className="relative flex h-3 w-3">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-rose-500"></span>
+                              </span>
+                              <span>OVERDUE • ATTENTION NEEDED</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Main Card Body: Last Check-In Time & Status Details */}
+                      <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                        <div className="space-y-2">
+                          <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                            Last Check-In Time
+                          </div>
+                          <div
+                            data-testid="senior-last-checkin-time"
+                            className="flex flex-wrap items-baseline gap-2"
+                          >
+                            <span className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                              {lastTime ? formatCheckInTime(lastTime) : 'No check-in yet'}
+                            </span>
+                            {lastTime && (
+                              <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-slate-200 text-slate-700">
+                                {getRelativeTime(lastTime)}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-600">
+                            {isGreen
+                              ? 'Recent check-in received within normal safety window.'
+                              : 'Check-in is overdue. Contact senior to confirm wellbeing.'}
+                          </p>
+                        </div>
+
+                        {/* Latest Check-In Details / Note */}
+                        <div className="bg-white/90 backdrop-blur-xs p-4 rounded-2xl border border-slate-200 shadow-2xs space-y-2">
+                          <div className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>Latest Logged Activity</span>
+                            {senior.latestCheckIn && (
+                              <span
+                                className={`text-xs font-bold px-2 py-0.5 rounded-md border ${getTypeBadgeClass(
+                                  senior.latestCheckIn.type
+                                )}`}
+                              >
+                                {senior.latestCheckIn.type === 'PILLS'
+                                  ? '💊 PILLS'
+                                  : senior.latestCheckIn.type === 'MEAL'
+                                  ? '🍲 MEAL'
+                                  : '😊 MOOD'}
+                              </span>
+                            )}
+                          </div>
+
+                          {senior.latestCheckIn ? (
+                            <div>
+                              <p className="text-sm font-bold text-slate-800">
+                                "{senior.latestCheckIn.status}"
+                              </p>
+                              <p className="text-xs text-slate-500 mt-1">
+                                Recorded at:{' '}
+                                {new Date(senior.latestCheckIn.timestamp).toLocaleTimeString([], {
+                                  hour: 'numeric',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })}
+                              </p>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-slate-500 italic">
+                              No activity logged yet today.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Card Footer: Live Room Info */}
+                      <div className="mt-6 pt-4 border-t border-slate-200/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500">
+                        <div className="flex items-center space-x-2">
+                          <span className="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
+                          <span>Socket.io Room:</span>
+                          <code className="font-mono font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded">
+                            {senior.familyGroupId}
+                          </code>
+                        </div>
+                        <div className="text-slate-500 font-medium">
+                          Updates instantly without page refresh on <code className="font-mono font-semibold text-emerald-700">checkin:new</code>
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <h3 className="font-semibold text-slate-800">{familyUser.name}</h3>
-                      <span className="text-xs text-slate-500">Primary Family Caregiver</span>
-                    </div>
-                  </div>
-                  <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                    {familyUser.role}
-                  </span>
-                </div>
-                <div className="mt-4 space-y-2 text-sm text-slate-600">
-                  <p>
-                    <span className="font-medium text-slate-700">Phone:</span> {familyUser.phone}
-                  </p>
-                  <p>
-                    <span className="font-medium text-slate-700">Family Group:</span>{' '}
-                    <span className="font-mono text-xs">{familyUser.familyGroupId}</span>
-                  </p>
-                </div>
+                  )
+                })}
               </div>
             </div>
 
@@ -731,9 +1039,94 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               {/* Check-Ins Column */}
               <div className="space-y-6">
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-                  <h3 className="text-lg font-semibold text-slate-800 mb-4">
-                    Manual Check-In for {seniorUser.name}
+                {/* Live List of Check-Ins */}
+                <div
+                  data-testid="live-checkin-list"
+                  className="bg-white p-6 sm:p-7 rounded-3xl border border-slate-200 shadow-xs"
+                >
+                  <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100">
+                    <div>
+                      <div className="flex items-center space-x-2">
+                        <h3 className="text-lg font-bold text-slate-900">
+                          Live Check-Ins Feed
+                        </h3>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          <span className="w-1.5 h-1.5 mr-1 rounded-full bg-emerald-500 animate-pulse" />
+                          Live Stream
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Real-time Socket.io updates for room {seniorUser.familyGroupId}
+                      </p>
+                    </div>
+                    <span className="text-xs font-extrabold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full">
+                      {checkIns.length} Total
+                    </span>
+                  </div>
+
+                  {checkIns.length === 0 ? (
+                    <div className="text-center py-10 text-slate-400">
+                      <p className="text-3xl mb-2">📋</p>
+                      <p className="text-sm font-medium">No check-ins logged yet.</p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Check in from senior view or submit a manual check-in below.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+                      {checkIns.map((item, index) => (
+                        <div
+                          key={item.id}
+                          data-testid="checkin-item"
+                          className={`p-3.5 border rounded-2xl flex items-center justify-between transition-all ${
+                            index === 0 && lastLiveEvent && lastLiveEvent.id === item.id
+                              ? 'bg-emerald-50/80 border-emerald-300 ring-2 ring-emerald-400/20'
+                              : 'bg-slate-50/70 hover:bg-slate-100/70 border-slate-200'
+                          }`}
+                        >
+                          <div className="flex items-center space-x-3">
+                            <span className="text-2xl select-none">
+                              {item.type === 'PILLS' ? '💊' : item.type === 'MEAL' ? '🍲' : '😊'}
+                            </span>
+                            <div>
+                              <div className="flex items-center space-x-2">
+                                <span
+                                  className={`text-xs font-extrabold px-2 py-0.5 rounded-md border ${getTypeBadgeClass(
+                                    item.type
+                                  )}`}
+                                >
+                                  {item.type}
+                                </span>
+                                <span className="text-sm font-semibold text-slate-800">
+                                  {item.status}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-500 mt-1">
+                                {formatCheckInTime(item.timestamp)} •{' '}
+                                <span className="font-medium text-slate-600">
+                                  {item.user?.name || seniorUser.name}
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                              Saved to DB
+                            </span>
+                            <span className="text-xs text-slate-400 font-mono">
+                              {getRelativeTime(item.timestamp)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Manual Check-In Form */}
+                <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs">
+                  <h3 className="text-base font-bold text-slate-800 mb-3">
+                    Log Check-In for {seniorUser.name}
                   </h3>
                   <form onSubmit={handleCustomCheckInSubmit} className="space-y-4">
                     <div>
@@ -781,45 +1174,55 @@ export default function App() {
                     </button>
                   </form>
                 </div>
-
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
-                  <h3 className="text-lg font-semibold text-slate-800 mb-4">Recent Check-Ins</h3>
-                  {checkIns.length === 0 ? (
-                    <p className="text-sm text-slate-500">No check-ins logged yet.</p>
-                  ) : (
-                    <div className="space-y-3">
-                      {checkIns.map((item) => (
-                        <div
-                          key={item.id}
-                          className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between"
-                        >
-                          <div>
-                            <div className="flex items-center space-x-2">
-                              <span
-                                className={`text-xs font-bold px-2 py-0.5 rounded-sm border ${getTypeBadgeClass(
-                                  item.type
-                                )}`}
-                              >
-                                {item.type}
-                              </span>
-                              <span className="text-sm font-medium text-slate-800">
-                                {item.status}
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-400 mt-1">
-                              {new Date(item.timestamp).toLocaleString()}
-                            </p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
               </div>
 
-              {/* Alerts Column */}
+              {/* Alerts & Member Profiles Column */}
               <div className="space-y-6">
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
+                {/* Member Profile Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+                    <div className="flex items-center space-x-3 pb-3 border-b border-slate-100">
+                      <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-base">
+                        EV
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-slate-800 text-sm">{seniorUser.name}</h4>
+                        <span className="text-xs text-slate-500">Senior Care Recipient</span>
+                      </div>
+                    </div>
+                    <div className="mt-3 space-y-1 text-xs text-slate-600">
+                      <p>
+                        <span className="font-medium text-slate-700">Phone:</span> {seniorUser.phone}
+                      </p>
+                      <p>
+                        <span className="font-medium text-slate-700">Role:</span> {seniorUser.role}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+                    <div className="flex items-center space-x-3 pb-3 border-b border-slate-100">
+                      <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-base">
+                        DV
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-slate-800 text-sm">{familyUser.name}</h4>
+                        <span className="text-xs text-slate-500">Primary Caregiver</span>
+                      </div>
+                    </div>
+                    <div className="mt-3 space-y-1 text-xs text-slate-600">
+                      <p>
+                        <span className="font-medium text-slate-700">Phone:</span> {familyUser.phone}
+                      </p>
+                      <p>
+                        <span className="font-medium text-slate-700">Role:</span> {familyUser.role}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Alert Center */}
+                <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold text-slate-800">Alert Center</h3>
                     <span className="text-xs font-semibold text-slate-500">
@@ -879,7 +1282,7 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="bg-emerald-50 p-6 rounded-2xl border border-emerald-200">
+                <div className="bg-emerald-50 p-6 rounded-3xl border border-emerald-200">
                   <h4 className="text-sm font-semibold text-emerald-900 mb-2">
                     Prisma Studio & Socket.io Live Status
                   </h4>
