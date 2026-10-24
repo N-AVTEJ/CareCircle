@@ -95,6 +95,15 @@ export default function App() {
     }
   }, [])
 
+  // Auto-dismiss feedback toast after 6 seconds
+  useEffect(() => {
+    if (!checkInFeedback) return
+    const timer = setTimeout(() => {
+      setCheckInFeedback(null)
+    }, 6000)
+    return () => clearTimeout(timer)
+  }, [checkInFeedback])
+
   // Resolved user models (using seeded data or fallback)
   const seniorUser = users.find((u) => u.role === 'SENIOR') || {
     id: HARDCODED_SENIOR_USER_ID,
@@ -114,6 +123,7 @@ export default function App() {
 
   // 1-Tap Senior Check-In action
   const handleSeniorCheckIn = async (type, defaultStatus) => {
+    if (pendingButton) return // Prevent rapid double-tap / concurrent submissions
     setPendingButton(type)
     setErrorMsg(null)
     try {
@@ -251,8 +261,12 @@ export default function App() {
     }
   }
 
+  const seniorCheckIns = checkIns.filter(
+    (c) => c.userId === seniorUser.id || c.userId === HARDCODED_SENIOR_USER_ID
+  )
+
   const getLastCheckInTime = (type) => {
-    const item = checkIns.find((c) => c.type === type)
+    const item = seniorCheckIns.find((c) => c.type === type)
     if (!item) return null
     const date = new Date(item.timestamp)
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -398,7 +412,10 @@ export default function App() {
 
             {/* Check-In Success Toast */}
             {checkInFeedback && (
-              <div className="p-4 sm:p-5 rounded-2xl bg-emerald-50 border-2 border-emerald-400 text-emerald-900 shadow-sm animate-fade-in flex items-center justify-between">
+              <div
+                data-testid="checkin-feedback"
+                className="p-4 sm:p-5 rounded-2xl bg-emerald-50 border-2 border-emerald-400 text-emerald-900 shadow-sm animate-fade-in flex items-center justify-between"
+              >
                 <div className="flex items-center space-x-3">
                   <span className="text-3xl">✅</span>
                   <div>
@@ -426,11 +443,15 @@ export default function App() {
                 {/* 1. PILLS BUTTON */}
                 <button
                   type="button"
+                  data-testid="senior-button-pills"
+                  aria-label="Pills Check-In"
                   onClick={() => handleSeniorCheckIn('PILLS', 'Morning medications taken')}
-                  disabled={pendingButton === 'PILLS'}
+                  disabled={Boolean(pendingButton)}
                   className={`w-full text-left p-6 sm:p-7 rounded-2xl border-3 transition-all duration-150 transform active:scale-98 cursor-pointer shadow-sm hover:shadow-md ${
                     pendingButton === 'PILLS'
                       ? 'opacity-70 bg-blue-100 border-blue-500'
+                      : pendingButton
+                      ? 'opacity-50 cursor-not-allowed bg-blue-50/50 border-blue-200'
                       : 'bg-gradient-to-br from-blue-50 via-white to-blue-50 hover:from-blue-100 hover:to-indigo-50 border-blue-400 hover:border-blue-600'
                   }`}
                 >
@@ -461,11 +482,15 @@ export default function App() {
                 {/* 2. MEAL BUTTON */}
                 <button
                   type="button"
+                  data-testid="senior-button-meal"
+                  aria-label="Meal Check-In"
                   onClick={() => handleSeniorCheckIn('MEAL', 'Finished a healthy meal')}
-                  disabled={pendingButton === 'MEAL'}
+                  disabled={Boolean(pendingButton)}
                   className={`w-full text-left p-6 sm:p-7 rounded-2xl border-3 transition-all duration-150 transform active:scale-98 cursor-pointer shadow-sm hover:shadow-md ${
                     pendingButton === 'MEAL'
                       ? 'opacity-70 bg-emerald-100 border-emerald-500'
+                      : pendingButton
+                      ? 'opacity-50 cursor-not-allowed bg-emerald-50/50 border-emerald-200'
                       : 'bg-gradient-to-br from-emerald-50 via-white to-emerald-50 hover:from-emerald-100 hover:to-teal-50 border-emerald-400 hover:border-emerald-600'
                   }`}
                 >
@@ -496,11 +521,15 @@ export default function App() {
                 {/* 3. MOOD BUTTON */}
                 <button
                   type="button"
+                  data-testid="senior-button-mood"
+                  aria-label="Mood Check-In"
                   onClick={() => handleSeniorCheckIn('MOOD', 'Feeling good and cheerful')}
-                  disabled={pendingButton === 'MOOD'}
+                  disabled={Boolean(pendingButton)}
                   className={`w-full text-left p-6 sm:p-7 rounded-2xl border-3 transition-all duration-150 transform active:scale-98 cursor-pointer shadow-sm hover:shadow-md ${
                     pendingButton === 'MOOD'
                       ? 'opacity-70 bg-purple-100 border-purple-500'
+                      : pendingButton
+                      ? 'opacity-50 cursor-not-allowed bg-purple-50/50 border-purple-200'
                       : 'bg-gradient-to-br from-purple-50 via-white to-amber-50 hover:from-purple-100 hover:to-pink-50 border-purple-400 hover:border-purple-600'
                   }`}
                 >
@@ -553,24 +582,24 @@ export default function App() {
             </div>
 
             {/* Live Senior Activity Feed */}
-            <div className="bg-white rounded-2xl p-6 sm:p-7 border border-slate-200 shadow-xs">
+            <div data-testid="senior-activity-feed" className="bg-white rounded-2xl p-6 sm:p-7 border border-slate-200 shadow-xs">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-bold text-slate-900">
                   Recent Check-In Activity for {seniorUser.name}
                 </h3>
                 <span className="text-xs font-semibold text-slate-500">
-                  {checkIns.length} logged
+                  {seniorCheckIns.length} logged
                 </span>
               </div>
 
-              {checkIns.length === 0 ? (
+              {seniorCheckIns.length === 0 ? (
                 <div className="text-center py-8 text-slate-400">
                   <p className="text-2xl mb-1">📋</p>
                   <p className="text-sm font-medium">No check-ins recorded yet.</p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {checkIns.slice(0, 6).map((item) => (
+                  {seniorCheckIns.slice(0, 6).map((item) => (
                     <div
                       key={item.id}
                       className="p-3.5 bg-slate-50 hover:bg-slate-100/70 border border-slate-200 rounded-xl flex items-center justify-between transition-colors"
