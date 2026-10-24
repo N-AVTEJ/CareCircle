@@ -12,7 +12,8 @@
     "prisma:seed": "prisma db seed",
     "prisma:studio": "prisma studio",
     "test": "node --test test/api.test.js",
-    "verify:checkin": "node test/verify-senior-checkin.js"
+    "verify:checkin": "node test/verify-senior-checkin.js",
+    "verify:dashboard": "node test/verify-dashboard-tabs.js"
   },
   "prisma": {
     "seed": "node prisma/seed.js"
