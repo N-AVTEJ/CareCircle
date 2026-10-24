@@ -381,3 +381,99 @@ test('PATCH /api/alerts/:id returns 404 for non-existent alert', async () => {
   const json = await res.json()
   assert.equal(json.success, false)
 })
+
+test('POST /api/checkin normalizes case-insensitive type (e.g. Pills, meal) and trims status', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'Pills',
+      status: '   Evening dose taken with water   ',
+    }),
+  })
+  assert.equal(res.status, 201)
+  const json = await res.json()
+  assert.equal(json.success, true)
+  assert.equal(json.data.type, 'PILLS')
+  assert.equal(json.data.status, 'Evening dose taken with water')
+
+  const dbRecord = await prisma.checkIn.findUnique({
+    where: { id: json.data.id },
+  })
+  assert.ok(dbRecord)
+  assert.equal(dbRecord.type, 'PILLS')
+  assert.equal(dbRecord.status, 'Evening dose taken with water')
+})
+
+test('POST /api/checkin rejects whitespace-only status with 400', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'MEAL',
+      status: '    ',
+    }),
+  })
+  assert.equal(res.status, 400)
+  const json = await res.json()
+  assert.equal(json.success, false)
+  assert.ok(json.error.includes('non-empty status'))
+})
+
+test('GET /api/checkins filters by familyGroupId and type', async () => {
+  const res = await fetch(`${baseUrl}/api/checkins?familyGroupId=fam_group_carecircle_101&type=PILLS`)
+  assert.equal(res.status, 200)
+  const json = await res.json()
+  assert.equal(json.success, true)
+  assert.ok(json.data.length > 0)
+  assert.ok(json.data.every((c) => c.type === 'PILLS' && c.user.familyGroupId === 'fam_group_carecircle_101'))
+})
+
+test('Socket.io client receives checkin:new when connecting via auth.familyGroupId', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  const socketAuth = Client(baseUrl, {
+    auth: { familyGroupId: senior.familyGroupId },
+    transports: ['websocket'],
+  })
+
+  await new Promise((resolve) => socketAuth.on('connect', resolve))
+
+  const eventPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timed out waiting for auth checkin:new event')), 4000)
+    socketAuth.on('checkin:new', (payload) => {
+      clearTimeout(timeout)
+      resolve(payload)
+    })
+  })
+
+  const res = await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'meal',
+      status: 'Warm supper enjoyed',
+    }),
+  })
+  assert.equal(res.status, 201)
+
+  const received = await eventPromise
+  assert.equal(received.type, 'MEAL')
+  assert.equal(received.status, 'Warm supper enjoyed')
+
+  socketAuth.disconnect()
+})
+
