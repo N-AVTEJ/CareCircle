@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { io } from 'socket.io-client'
+import MoodTrendView from './components/MoodTrendView.jsx'
 
 const API_BASE = ''
 const HARDCODED_SENIOR_USER_ID = 'ffd75d01-03e9-4138-abd1-b095ac5ba212'
@@ -78,6 +79,8 @@ export default function App() {
   }, [users])
   const [dashboardSeniors, setDashboardSeniors] = useState([])
   const [checkIns, setCheckIns] = useState([])
+  const [moodCheckIns, setMoodCheckIns] = useState([])
+  const [moodLoading, setMoodLoading] = useState(true)
   const [alerts, setAlerts] = useState([])
   const [resolvingAlertId, setResolvingAlertId] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -109,7 +112,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [dashRes, uRes, aRes] = await Promise.all([
+      const [dashRes, uRes, aRes, mRes] = await Promise.all([
         fetch(`${API_BASE}/api/dashboard/${activeFamilyGroupId}`).then((r) =>
           r.ok ? r.json() : null
         ),
@@ -119,6 +122,9 @@ export default function App() {
         fetch(
           `${API_BASE}/api/alerts?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}`
         ).then((r) => (r.ok ? r.json() : null)),
+        fetch(
+          `${API_BASE}/api/checkins?familyGroupId=${encodeURIComponent(activeFamilyGroupId)}&type=MOOD&limit=7`
+        ).then((r) => (r.ok ? r.json() : null)),
       ])
 
       if (dashRes && dashRes.success) {
@@ -127,6 +133,10 @@ export default function App() {
         setIsLive(true)
       } else {
         setIsLive(false)
+      }
+
+      if (mRes && mRes.success) {
+        setMoodCheckIns(mRes.data || [])
       }
 
       if (uRes && uRes.success) {
@@ -139,6 +149,7 @@ export default function App() {
       setIsLive(false)
     } finally {
       setLoading(false)
+      setMoodLoading(false)
     }
   }, [activeFamilyGroupId])
 
@@ -189,6 +200,14 @@ export default function App() {
         if (prev.some((c) => c.id === newCheckIn.id)) return prev
         return [newCheckIn, ...prev]
       })
+
+      // 1b. If MOOD check-in, update mood trend state (keep last 7)
+      if (newCheckIn.type === 'MOOD') {
+        setMoodCheckIns((prev) => {
+          if (prev.some((m) => m.id === newCheckIn.id)) return prev
+          return [newCheckIn, ...prev].slice(0, 7)
+        })
+      }
 
       // 2. Status card (update only the matching senior's status to GREEN)
       setDashboardSeniors((prevSeniors) => {
@@ -525,6 +544,12 @@ export default function App() {
             if (prev.some((c) => c.id === json.data.id)) return prev
             return [json.data, ...prev]
           })
+          if (type === 'MOOD') {
+            setMoodCheckIns((prev) => {
+              if (prev.some((m) => m.id === json.data.id)) return prev
+              return [json.data, ...prev].slice(0, 7)
+            })
+          }
           setDashboardSeniors((prev) => {
             if (!prev || prev.length === 0) {
               return [
@@ -596,6 +621,12 @@ export default function App() {
             if (prev.some((c) => c.id === json.data.id)) return prev
             return [json.data, ...prev]
           })
+          if (customCheckInType === 'MOOD') {
+            setMoodCheckIns((prev) => {
+              if (prev.some((m) => m.id === json.data.id)) return prev
+              return [json.data, ...prev].slice(0, 7)
+            })
+          }
           setDashboardSeniors((prev) =>
             prev.map((s) => {
               if (s.id === targetSeniorId) {
@@ -836,24 +867,32 @@ export default function App() {
         ]
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans overflow-x-hidden">
       {/* Top Navigation & Status Bar */}
-      <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-3.5 shadow-xs sticky top-0 z-20">
-        <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-black text-xl shadow-xs">
-              CC
+      <header className="bg-white border-b border-slate-200 px-3.5 sm:px-6 py-2.5 sm:py-3.5 shadow-xs sticky top-0 z-20">
+        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2.5 sm:space-x-3">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-black text-lg sm:text-xl shadow-xs">
+                CC
+              </div>
+              <div>
+                <h1 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight leading-tight">
+                  CareCircle
+                </h1>
+                <p className="text-[11px] sm:text-xs text-slate-500 font-medium">Family Care & Daily Check-Ins</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-xl font-bold text-slate-900 tracking-tight leading-tight">
-                CareCircle
-              </h1>
-              <p className="text-xs text-slate-500 font-medium">Family Care & Daily Check-Ins</p>
+
+            {/* Mobile Online status badge */}
+            <div className="flex sm:hidden items-center space-x-1.5 text-xs bg-slate-100 px-2 py-1 rounded-full border border-slate-200">
+              <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+              <span className="font-bold text-slate-700 text-[11px]">{isLive ? 'Live' : 'Syncing'}</span>
             </div>
           </div>
 
           {/* Mode Switcher and Indicators */}
-          <div className="flex items-center space-x-2 sm:space-x-3">
+          <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
             <div className="hidden sm:flex items-center space-x-2">
               <span
                 className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${
@@ -895,28 +934,30 @@ export default function App() {
               </button>
             </div>
 
-            <div className="bg-slate-100 p-1 rounded-xl flex items-center">
+            <div className="bg-slate-200/80 p-1 rounded-2xl flex items-center shadow-inner border border-slate-300 relative w-full sm:w-auto grid grid-cols-2 sm:flex">
               <button
                 type="button"
                 onClick={() => handleViewSelect('SENIOR')}
-                className={`px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer ${
+                className={`min-h-[48px] px-3 sm:px-5 py-2 text-xs sm:text-sm font-black rounded-xl transition-all duration-200 cursor-pointer flex items-center justify-center gap-1.5 tactile-button ${
                   activeView === 'SENIOR'
-                    ? 'bg-white text-emerald-800 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-white text-emerald-950 shadow-md border border-emerald-300 scale-[1.02]'
+                    : 'text-slate-700 hover:text-slate-950'
                 }`}
               >
-                👵 Senior View
+                <span className="text-base">👵</span>
+                <span>Senior View</span>
               </button>
               <button
                 type="button"
                 onClick={() => handleViewSelect('FAMILY')}
-                className={`px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-bold rounded-lg transition-all cursor-pointer ${
+                className={`min-h-[48px] px-3 sm:px-5 py-2 text-xs sm:text-sm font-black rounded-xl transition-all duration-200 cursor-pointer flex items-center justify-center gap-1.5 tactile-button ${
                   activeView === 'FAMILY'
-                    ? 'bg-white text-emerald-800 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-white text-emerald-950 shadow-md border border-emerald-300 scale-[1.02]'
+                    : 'text-slate-700 hover:text-slate-950'
                 }`}
               >
-                👨‍👩‍👦 Family Dashboard
+                <span className="text-base">👨‍👩‍👦</span>
+                <span>Family Dashboard</span>
               </button>
             </div>
           </div>
@@ -969,10 +1010,10 @@ export default function App() {
                           key={s.id}
                           type="button"
                           onClick={() => setSelectedSeniorId(s.id)}
-                          className={`text-xs px-2.5 py-1 rounded-lg font-bold border transition-colors cursor-pointer ${
+                          className={`min-h-[48px] px-4 py-2 rounded-xl text-xs sm:text-sm font-black border-2 transition-all cursor-pointer tactile-button ${
                             s.id === seniorUser.id
-                              ? 'bg-emerald-600 text-white border-emerald-600'
-                              : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                              ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                              : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
                           }`}
                         >
                           {s.name}
@@ -1029,10 +1070,10 @@ export default function App() {
                 </div>
                 <button
                   onClick={() => setCheckInFeedback(null)}
-                  className={`font-bold px-3 py-1 text-sm rounded-lg cursor-pointer transition-colors ${
+                  className={`font-black px-4 py-2.5 min-h-[48px] text-sm rounded-xl cursor-pointer transition-colors tactile-button ${
                     checkInFeedback.type === 'SOS'
-                      ? 'text-red-800 hover:text-red-950 bg-red-100 hover:bg-red-200'
-                      : 'text-emerald-700 hover:text-emerald-900 bg-emerald-100 hover:bg-emerald-200'
+                      ? 'text-red-900 hover:text-red-950 bg-red-100 hover:bg-red-200 border border-red-300'
+                      : 'text-emerald-900 hover:text-emerald-950 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300'
                   }`}
                 >
                   Dismiss
@@ -1045,7 +1086,7 @@ export default function App() {
               <div
                 data-testid="senior-active-sos-banner"
                 role="alert"
-                className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white shadow-lg border-2 border-red-400 animate-pulse flex items-center justify-between gap-4"
+                className="p-4 sm:p-5 rounded-3xl bg-gradient-to-r from-red-600 to-rose-700 text-white shadow-xl border-3 border-red-400 animate-pulse flex flex-col sm:flex-row sm:items-center justify-between gap-4"
               >
                 <div className="flex items-center space-x-3">
                   <span className="text-3xl select-none">🚨</span>
@@ -1061,7 +1102,7 @@ export default function App() {
                 <a
                   href={`tel:${familyUser.phone}`}
                   data-testid="senior-call-caregiver-button"
-                  className="shrink-0 bg-white hover:bg-red-50 text-red-700 font-black text-xs sm:text-sm px-4 py-2.5 rounded-xl transition-colors shadow-xs cursor-pointer"
+                  className="shrink-0 bg-white hover:bg-red-50 text-red-700 font-black text-sm sm:text-base px-6 py-3.5 rounded-2xl transition-all shadow-md cursor-pointer min-h-[60px] flex items-center justify-center border-2 border-red-200 tactile-button"
                 >
                   📞 Call Caregiver
                 </a>
@@ -1081,33 +1122,33 @@ export default function App() {
                   aria-label="Pills Check-In"
                   onClick={() => handleSeniorCheckIn('PILLS', 'Morning medications taken')}
                   disabled={Boolean(pendingButton)}
-                  className={`w-full text-left p-6 sm:p-7 rounded-2xl border-3 transition-all duration-150 transform active:scale-98 cursor-pointer shadow-sm hover:shadow-md ${
+                  className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
                     pendingButton === 'PILLS'
                       ? 'opacity-70 bg-blue-100 border-blue-500'
                       : pendingButton
                       ? 'opacity-50 cursor-not-allowed bg-blue-50/50 border-blue-200'
-                      : 'bg-gradient-to-br from-blue-50 via-white to-blue-50 hover:from-blue-100 hover:to-indigo-50 border-blue-400 hover:border-blue-600'
+                      : 'bg-gradient-to-br from-blue-50 via-white to-blue-100 hover:from-blue-100 hover:to-indigo-100 border-blue-500 hover:border-blue-700'
                   }`}
                 >
                   <div className="flex items-start justify-between">
                     <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Pills">
                       💊
                     </span>
-                    <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                    <span className="text-xs font-black px-3 py-1 rounded-full bg-blue-200/80 text-blue-950 border border-blue-300">
                       {pendingButton === 'PILLS' ? 'Sending...' : '1-Tap'}
                     </span>
                   </div>
 
                   <div className="mt-4">
-                    <h3 className="text-2xl sm:text-3xl font-extrabold text-blue-950 tracking-tight">
+                    <h3 className="text-2xl sm:text-3xl font-black text-blue-950 tracking-tight">
                       Pills
                     </h3>
-                    <p className="text-sm font-medium text-blue-800 mt-1">Took My Medication</p>
+                    <p className="text-sm sm:text-base font-bold text-blue-900 mt-1">Took My Medication</p>
                   </div>
 
-                  <div className="mt-6 pt-3 border-t border-blue-200/70 flex items-center justify-between text-xs text-blue-700">
+                  <div className="mt-6 pt-3 border-t border-blue-300/70 flex items-center justify-between text-xs sm:text-sm text-blue-900 font-semibold">
                     <span>Last taken:</span>
-                    <span className="font-bold">
+                    <span className="font-black">
                       {getLastCheckInTime('PILLS') || 'Not yet today'}
                     </span>
                   </div>
@@ -1120,33 +1161,33 @@ export default function App() {
                   aria-label="Meal Check-In"
                   onClick={() => handleSeniorCheckIn('MEAL', 'Finished a healthy meal')}
                   disabled={Boolean(pendingButton)}
-                  className={`w-full text-left p-6 sm:p-7 rounded-2xl border-3 transition-all duration-150 transform active:scale-98 cursor-pointer shadow-sm hover:shadow-md ${
+                  className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
                     pendingButton === 'MEAL'
                       ? 'opacity-70 bg-emerald-100 border-emerald-500'
                       : pendingButton
                       ? 'opacity-50 cursor-not-allowed bg-emerald-50/50 border-emerald-200'
-                      : 'bg-gradient-to-br from-emerald-50 via-white to-emerald-50 hover:from-emerald-100 hover:to-teal-50 border-emerald-400 hover:border-emerald-600'
+                      : 'bg-gradient-to-br from-emerald-50 via-white to-emerald-100 hover:from-emerald-100 hover:to-teal-100 border-emerald-500 hover:border-emerald-700'
                   }`}
                 >
                   <div className="flex items-start justify-between">
                     <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Meal">
                       🍲
                     </span>
-                    <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    <span className="text-xs font-black px-3 py-1 rounded-full bg-emerald-200/80 text-emerald-950 border border-emerald-300">
                       {pendingButton === 'MEAL' ? 'Sending...' : '1-Tap'}
                     </span>
                   </div>
 
                   <div className="mt-4">
-                    <h3 className="text-2xl sm:text-3xl font-extrabold text-emerald-950 tracking-tight">
+                    <h3 className="text-2xl sm:text-3xl font-black text-emerald-950 tracking-tight">
                       Meal
                     </h3>
-                    <p className="text-sm font-medium text-emerald-800 mt-1">Ate My Meal</p>
+                    <p className="text-sm sm:text-base font-bold text-emerald-900 mt-1">Ate My Meal</p>
                   </div>
 
-                  <div className="mt-6 pt-3 border-t border-emerald-200/70 flex items-center justify-between text-xs text-emerald-700">
+                  <div className="mt-6 pt-3 border-t border-emerald-300/70 flex items-center justify-between text-xs sm:text-sm text-emerald-900 font-semibold">
                     <span>Last meal:</span>
-                    <span className="font-bold">
+                    <span className="font-black">
                       {getLastCheckInTime('MEAL') || 'Not yet today'}
                     </span>
                   </div>
@@ -1159,33 +1200,33 @@ export default function App() {
                   aria-label="Mood Check-In"
                   onClick={() => handleSeniorCheckIn('MOOD', 'Feeling good and cheerful')}
                   disabled={Boolean(pendingButton)}
-                  className={`w-full text-left p-6 sm:p-7 rounded-2xl border-3 transition-all duration-150 transform active:scale-98 cursor-pointer shadow-sm hover:shadow-md ${
+                  className={`w-full text-left p-6 sm:p-7 rounded-3xl border-3 sm:border-4 transition-all duration-200 cursor-pointer shadow-sm hover:shadow-lg min-h-[145px] sm:min-h-[160px] tactile-button ${
                     pendingButton === 'MOOD'
                       ? 'opacity-70 bg-purple-100 border-purple-500'
                       : pendingButton
                       ? 'opacity-50 cursor-not-allowed bg-purple-50/50 border-purple-200'
-                      : 'bg-gradient-to-br from-purple-50 via-white to-amber-50 hover:from-purple-100 hover:to-pink-50 border-purple-400 hover:border-purple-600'
+                      : 'bg-gradient-to-br from-purple-50 via-white to-purple-100 hover:from-purple-100 hover:to-pink-100 border-purple-500 hover:border-purple-700'
                   }`}
                 >
                   <div className="flex items-start justify-between">
                     <span className="text-5xl sm:text-6xl select-none" role="img" aria-label="Mood">
                       😊
                     </span>
-                    <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-purple-100 text-purple-800 border border-purple-200">
+                    <span className="text-xs font-black px-3 py-1 rounded-full bg-purple-200/80 text-purple-950 border border-purple-300">
                       {pendingButton === 'MOOD' ? 'Sending...' : '1-Tap'}
                     </span>
                   </div>
 
                   <div className="mt-4">
-                    <h3 className="text-2xl sm:text-3xl font-extrabold text-purple-950 tracking-tight">
+                    <h3 className="text-2xl sm:text-3xl font-black text-purple-950 tracking-tight">
                       Mood
                     </h3>
-                    <p className="text-sm font-medium text-purple-800 mt-1">Feeling Good</p>
+                    <p className="text-sm sm:text-base font-bold text-purple-900 mt-1">Feeling Good</p>
                   </div>
 
-                  <div className="mt-6 pt-3 border-t border-purple-200/70 flex items-center justify-between text-xs text-purple-700">
+                  <div className="mt-6 pt-3 border-t border-purple-300/70 flex items-center justify-between text-xs sm:text-sm text-purple-900 font-semibold">
                     <span>Last shared:</span>
-                    <span className="font-bold">
+                    <span className="font-black">
                       {getLastCheckInTime('MOOD') || 'Not yet today'}
                     </span>
                   </div>
@@ -1221,15 +1262,15 @@ export default function App() {
                   aria-label="Emergency SOS"
                   onClick={() => setShowSosConfirmDialog(true)}
                   disabled={submittingAlert}
-                  className="w-full md:w-auto shrink-0 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-black text-lg sm:text-xl px-8 py-5 rounded-2xl shadow-xl hover:shadow-2xl border-2 border-red-400 cursor-pointer transition-all duration-150 flex items-center justify-center gap-3 ring-4 ring-red-200"
+                  className="w-full md:w-auto shrink-0 bg-gradient-to-r from-red-600 via-rose-600 to-red-700 hover:from-red-700 hover:to-rose-800 active:scale-95 text-white font-black text-lg sm:text-xl px-8 py-5 rounded-3xl shadow-xl hover:shadow-2xl border-3 border-red-400 cursor-pointer transition-all duration-150 flex items-center justify-center gap-3.5 ring-4 ring-red-300 min-h-[72px] sm:min-h-[80px] tactile-button"
                 >
-                  <span className="text-3xl select-none animate-bounce">🚨</span>
+                  <span className="text-3xl sm:text-4xl select-none animate-bounce">🚨</span>
                   <div className="text-left">
-                    <div className="leading-tight tracking-wider uppercase font-black text-xl">
+                    <div className="leading-tight tracking-wider uppercase font-black text-xl sm:text-2xl">
                       SOS Emergency
                     </div>
-                    <div className="text-xs font-semibold text-red-100 tracking-normal normal-case">
-                      Tap to notify family
+                    <div className="text-xs sm:text-sm font-bold text-red-100 tracking-normal normal-case">
+                      Tap to notify family caregiver
                     </div>
                   </div>
                 </button>
@@ -1248,10 +1289,10 @@ export default function App() {
                     setShowSosConfirmDialog(false)
                   }
                 }}
-                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs animate-fade-in"
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fade-in"
               >
                 <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border-4 border-red-500 space-y-6 text-center">
-                  <div className="w-20 h-20 mx-auto rounded-2xl bg-red-100 border-4 border-red-300 flex items-center justify-center text-4xl shadow-inner">
+                  <div className="w-20 h-20 mx-auto rounded-3xl bg-red-100 border-4 border-red-300 flex items-center justify-center text-4xl shadow-inner">
                     🚨
                   </div>
 
@@ -1262,19 +1303,19 @@ export default function App() {
                     >
                       Send Emergency SOS Alert?
                     </h3>
-                    <p className="text-slate-600 text-sm sm:text-base leading-relaxed">
+                    <p className="text-slate-700 text-sm sm:text-base leading-relaxed font-medium">
                       Are you sure you want to send an emergency SOS alert? This will immediately notify your
                       family caregiver{' '}
-                      <strong className="text-slate-900 font-bold">{familyUser.name}</strong> ({familyUser.phone}) with high priority.
+                      <strong className="text-slate-950 font-black">{familyUser.name}</strong> ({familyUser.phone}) with high priority.
                     </p>
                   </div>
 
-                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 font-medium">
+                  <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 text-xs sm:text-sm text-amber-950 font-bold">
                     ⚠️ Only send this alert if you are experiencing an emergency or need urgent help.
                   </div>
 
                   {errorMsg && (
-                    <div className="bg-red-50 border border-red-300 rounded-xl p-3 text-xs text-red-800 font-bold">
+                    <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-3.5 text-xs sm:text-sm text-red-900 font-black">
                       ⚠️ {errorMsg}
                     </div>
                   )}
@@ -1285,7 +1326,7 @@ export default function App() {
                       data-testid="cancel-sos-button"
                       onClick={() => setShowSosConfirmDialog(false)}
                       disabled={submittingAlert}
-                      className={`w-full py-3.5 px-4 rounded-xl border-2 border-slate-300 text-slate-700 font-extrabold text-sm sm:text-base transition-colors ${
+                      className={`w-full min-h-[60px] py-4 px-5 rounded-2xl border-2 border-slate-300 text-slate-800 font-black text-base sm:text-lg transition-colors tactile-button ${
                         submittingAlert
                           ? 'opacity-50 cursor-not-allowed'
                           : 'hover:bg-slate-100 cursor-pointer'
@@ -1299,10 +1340,10 @@ export default function App() {
                       data-testid="confirm-sos-button"
                       onClick={handleTriggerSos}
                       disabled={submittingAlert}
-                      className={`w-full py-3.5 px-4 rounded-xl bg-red-600 text-white font-black text-sm sm:text-base shadow-lg transition-colors flex items-center justify-center gap-2 ${
+                      className={`w-full min-h-[60px] py-4 px-5 rounded-2xl bg-red-600 text-white font-black text-base sm:text-lg shadow-xl transition-all flex items-center justify-center gap-2 tactile-button ${
                         submittingAlert
                           ? 'opacity-70 cursor-wait'
-                          : 'hover:bg-red-700 active:scale-95 cursor-pointer'
+                          : 'hover:bg-red-700 active:scale-95 cursor-pointer ring-2 ring-red-400'
                       }`}
                     >
                       {submittingAlert ? (
@@ -1723,6 +1764,17 @@ export default function App() {
                 })}
               </div>
             </div>
+
+            {/* Senior Mood Trend View: Last 7 mood check-ins (Emoji Row & Recharts line chart) */}
+            <MoodTrendView
+              moodCheckIns={
+                moodCheckIns.length > 0
+                  ? moodCheckIns
+                  : checkIns.filter((c) => c.type === 'MOOD')
+              }
+              loading={loading && moodLoading}
+              seniorName={seniorUser.name}
+            />
 
             {/* Check-ins and Alerts grid */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
