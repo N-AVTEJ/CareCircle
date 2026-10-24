@@ -179,10 +179,13 @@ app.patch('/api/alerts/:id', async (req, res) => {
   }
 })
 
-if (process.env.NODE_ENV !== 'test') {
+const isMain = process.argv[1] && (process.argv[1].endsWith('src/index.js') || process.argv[1].endsWith('src\\index.js'))
+
+if (isMain) {
   app.listen(PORT, () => {
     console.log(`CareCircle backend server running on http://localhost:${PORT}`)
   })
 }
 
+export { app, prisma }
 export default app
