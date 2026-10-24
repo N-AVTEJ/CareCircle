@@ -280,12 +280,14 @@ app.get('/api/users/:id', async (req, res) => {
 
 // Rule-based risk score calculation for last 7 days of check-ins
 export function calculateRiskScore(checkIns = [], now = new Date()) {
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const safeNow = now instanceof Date && !isNaN(now.getTime()) ? now : new Date(now)
+  const nowDate = isNaN(safeNow.getTime()) ? new Date() : safeNow
+  const sevenDaysAgo = new Date(nowDate.getTime() - 7 * 24 * 60 * 60 * 1000)
 
   // Filter check-ins to the 7-day window
   const recentCheckIns = checkIns.filter((c) => {
     const ts = new Date(c.timestamp).getTime()
-    return !isNaN(ts) && ts >= sevenDaysAgo.getTime() && ts <= now.getTime() + 60000
+    return !isNaN(ts) && ts >= sevenDaysAgo.getTime() && ts <= nowDate.getTime() + 60000
   })
 
   // 1. skippedMeals = count of MEAL type with status 'Skipped'
@@ -312,8 +314,12 @@ export function calculateRiskScore(checkIns = [], now = new Date()) {
   // Helper for UTC date key 'YYYY-MM-DD'
   const getUtcDateKey = (date) => {
     const d = new Date(date)
+    if (isNaN(d.getTime())) return ''
     return d.toISOString().slice(0, 10)
   }
+
+  const todayKey = getUtcDateKey(nowDate)
+  const yesterdayKey = getUtcDateKey(new Date(nowDate.getTime() - 86400000))
 
   // 2. missedPills = count of PILLS type with status != 'Yes' (or no entry that day)
   const missedPills = recentCheckIns.filter((c) => {
@@ -344,18 +350,29 @@ export function calculateRiskScore(checkIns = [], now = new Date()) {
     const latestMoodByDay = new Map()
     for (const c of moodCheckIns) {
       const key = getUtcDateKey(c.timestamp)
-      if (!latestMoodByDay.has(key)) {
+      if (key && !latestMoodByDay.has(key)) {
         latestMoodByDay.set(key, c)
       }
     }
 
-    const sortedDays = Array.from(latestMoodByDay.keys()).sort((a, b) => b.localeCompare(a))
-    const mostRecentDay = sortedDays[0]
-    const mostRecentMood = latestMoodByDay.get(mostRecentDay)
+    // Determine the anchor day for the streak: must be today (if logged) or yesterday (if today not yet logged)
+    let startDayKey = null
+    if (latestMoodByDay.has(todayKey)) {
+      const todayMood = latestMoodByDay.get(todayKey)
+      if (isNotGoodMood(todayMood.status)) {
+        startDayKey = todayKey
+      }
+      // If today has a check-in and it's Good, streak is broken/reset (badMoodStreak remains 0)
+    } else if (latestMoodByDay.has(yesterdayKey)) {
+      const yesterdayMood = latestMoodByDay.get(yesterdayKey)
+      if (isNotGoodMood(yesterdayMood.status)) {
+        startDayKey = yesterdayKey
+      }
+    }
 
-    if (mostRecentMood && isNotGoodMood(mostRecentMood.status)) {
+    if (startDayKey) {
       badMoodStreak = 1
-      let currentDay = mostRecentDay
+      let currentDay = startDayKey
 
       while (badMoodStreak < 7) {
         const d = new Date(currentDay + 'T00:00:00.000Z')

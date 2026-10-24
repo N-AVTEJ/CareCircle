@@ -1614,6 +1614,75 @@ test('GET /api/risk/:userId recomputes live when new bad check-ins are posted', 
   }
 })
 
+test('calculateRiskScore returns 0 badMoodStreak when adverse mood check-in is stale (e.g. 5 days ago)', () => {
+  const now = new Date()
+  const staleDate = new Date(now.getTime() - 5 * 86400000)
+  const checkIns = [{ type: 'MOOD', status: 'Not Good', timestamp: staleDate }]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.badMoodStreak, 0, 'Stale bad mood from 5 days ago should not be an active streak')
+  assert.equal(result.riskScore, 0)
+  assert.equal(result.level, 'LOW')
+})
+
+test('calculateRiskScore handles intraday mood updates using the latest check-in of the day', () => {
+  const now = new Date()
+  const morning = new Date(now.getTime() - 6 * 3600000)
+  const afternoon = new Date(now.getTime() - 1 * 3600000)
+
+  // Morning bad mood updated to afternoon good mood -> streak 0
+  const resetCheckIns = [
+    { type: 'MOOD', status: 'Not Good', timestamp: morning },
+    { type: 'MOOD', status: 'Feeling Great', timestamp: afternoon },
+  ]
+  const resetRes = calculateRiskScore(resetCheckIns, now)
+  assert.equal(resetRes.breakdown.badMoodStreak, 0, 'Afternoon good mood should supersede morning bad mood')
+
+  // Morning good mood updated to afternoon bad mood -> streak 1
+  const badCheckIns = [
+    { type: 'MOOD', status: 'Feeling Good', timestamp: morning },
+    { type: 'MOOD', status: 'Not Good', timestamp: afternoon },
+  ]
+  const badRes = calculateRiskScore(badCheckIns, now)
+  assert.equal(badRes.breakdown.badMoodStreak, 1, 'Afternoon bad mood should supersede morning good mood')
+})
+
+test('calculateRiskScore counts streak starting yesterday if today has no mood check-in yet', () => {
+  const now = new Date()
+  const yesterday = new Date(now.getTime() - 1 * 86400000)
+  const twoDaysAgo = new Date(now.getTime() - 2 * 86400000)
+
+  const checkIns = [
+    { type: 'MOOD', status: 'Not Good', timestamp: yesterday },
+    { type: 'MOOD', status: 'Not Good', timestamp: twoDaysAgo },
+  ]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.badMoodStreak, 2)
+  assert.equal(result.riskScore, 40) // 2 * 20
+  assert.equal(result.level, 'MEDIUM')
+})
+
+test('calculateRiskScore treats empty, null, or unknown pill status as missed pills', () => {
+  const now = new Date()
+  const checkIns = [
+    { type: 'PILLS', status: '', timestamp: now },
+    { type: 'PILLS', status: null, timestamp: new Date(now.getTime() - 1000) },
+    { type: 'PILLS', status: 'refused', timestamp: new Date(now.getTime() - 2000) },
+    { type: 'PILLS', status: 'Yes', timestamp: new Date(now.getTime() - 3000) },
+  ]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.missedPills, 3)
+})
+
+test('calculateRiskScore handles string or invalid date inputs gracefully without crashing', () => {
+  const resultStringDate = calculateRiskScore([], '2026-10-24T12:00:00Z')
+  assert.equal(resultStringDate.riskScore, 0)
+  assert.equal(resultStringDate.level, 'LOW')
+
+  const resultInvalidDate = calculateRiskScore([], 'invalid-date-string')
+  assert.equal(resultInvalidDate.riskScore, 0)
+  assert.equal(resultInvalidDate.level, 'LOW')
+})
+
 
 
 

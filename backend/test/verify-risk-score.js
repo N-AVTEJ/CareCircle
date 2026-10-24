@@ -35,7 +35,21 @@ function createCdpClient(ws) {
     return res?.result?.value
   }
 
-  return { sendCommand, evaluate }
+  const clickWhenReady = async (selector) => {
+    for (let i = 0; i < 40; i++) {
+      const isReady = await evaluate(
+        `Boolean(document.querySelector('${selector}') && !document.querySelector('${selector}').disabled)`
+      )
+      if (isReady) {
+        await evaluate(`document.querySelector('${selector}').click()`)
+        return
+      }
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error(`Timeout waiting for button '${selector}' to be enabled`)
+  }
+
+  return { sendCommand, evaluate, clickWhenReady }
 }
 
 async function runRiskScoreVerification() {
@@ -196,7 +210,7 @@ async function runRiskScoreVerification() {
     // STEP 1: Senior submits Skipped Meal from Tab 1
     // =========================================================================
     console.log('\n🍲 STEP 1: Senior clicks "Skipped Meal" in Tab 1...')
-    await cdpSenior.evaluate(`document.querySelector('[data-testid="senior-button-meal-skipped"]').click()`)
+    await cdpSenior.clickWhenReady('[data-testid="senior-button-meal-skipped"]')
 
     // Wait for Tab 2 to live-update via Socket.io
     let step1Updated = false
@@ -226,7 +240,7 @@ async function runRiskScoreVerification() {
     // STEP 2: Senior submits Not Good Mood from Tab 1
     // =========================================================================
     console.log('\n😔 STEP 2: Senior clicks "Not Good / Low Mood" in Tab 1...')
-    await cdpSenior.evaluate(`document.querySelector('[data-testid="senior-button-mood-bad"]').click()`)
+    await cdpSenior.clickWhenReady('[data-testid="senior-button-mood-bad"]')
 
     let step2Updated = false
     let step2Score = ''
@@ -255,7 +269,7 @@ async function runRiskScoreVerification() {
     // STEP 3: Senior submits Missed Pills from Tab 1 -> Transitions to YELLOW (MEDIUM, 40-70)
     // =========================================================================
     console.log('\n💊 STEP 3: Senior clicks "Missed / No Pills" in Tab 1 (Triggering transition to YELLOW / MEDIUM)...')
-    await cdpSenior.evaluate(`document.querySelector('[data-testid="senior-button-pills-missed"]').click()`)
+    await cdpSenior.clickWhenReady('[data-testid="senior-button-pills-missed"]')
 
     let step3Updated = false
     let step3Score = ''
@@ -295,11 +309,11 @@ async function runRiskScoreVerification() {
     // =========================================================================
     console.log('\n🚨 STEP 4: Submitting additional adverse check-ins (Triggering transition to RED / HIGH >= 70)...')
     // Click quick skipped meal (+10 pts) -> 55
-    await cdpSenior.evaluate(`document.querySelector('[data-testid="quick-button-meal-skipped"]').click()`)
+    await cdpSenior.clickWhenReady('[data-testid="quick-button-meal-skipped"]')
     await new Promise((r) => setTimeout(r, 300))
 
     // Click quick missed pills (+15 pts) -> 70 (HIGH!)
-    await cdpSenior.evaluate(`document.querySelector('[data-testid="quick-button-pills-missed"]').click()`)
+    await cdpSenior.clickWhenReady('[data-testid="quick-button-pills-missed"]')
 
     let step4Updated = false
     let step4Score = ''
