@@ -8,12 +8,18 @@ import cors from 'cors'
 import { Server } from 'socket.io'
 import { PrismaClient } from '@prisma/client'
 import cron from 'node-cron'
+import helmet from 'helmet'
+import rateLimit from 'express-rate-limit'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const frontendDist = path.resolve(__dirname, '../../frontend/dist')
 
+const isTestEnv = process.env.NODE_ENV === 'test'
+
 const app = express()
+app.disable('x-powered-by')
+
 const server = http.createServer(app)
 const io = new Server(server, {
   cors: {
@@ -25,8 +31,49 @@ const io = new Server(server, {
 const prisma = new PrismaClient()
 const PORT = process.env.PORT || 5000
 
+// HTTP Security Headers via Helmet
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        fontSrc: ["'self'", 'data:'],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  })
+)
+
+// Rate Limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isTestEnv ? 5000 : 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many requests, please try again later.' },
+})
+
+const emergencySosLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: isTestEnv ? 500 : 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many SOS requests. Please wait before retrying.' },
+})
+
+app.use('/api/', apiLimiter)
+app.use('/api/sos', emergencySosLimiter)
+
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '10kb' }))
 
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist, { index: false }))
@@ -226,7 +273,7 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
     })
   } catch (error) {
     console.error('Error fetching dashboard:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -234,8 +281,12 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
 app.get('/api/users', async (req, res) => {
   try {
     const { familyGroupId } = req.query
+    const trimmedGroupId = familyGroupId ? String(familyGroupId).trim() : null
+    if (trimmedGroupId && trimmedGroupId.length > 100) {
+      return res.status(400).json({ success: false, error: 'familyGroupId must not exceed 100 characters' })
+    }
     const users = await prisma.user.findMany({
-      where: familyGroupId ? { familyGroupId: String(familyGroupId) } : undefined,
+      where: trimmedGroupId ? { familyGroupId: trimmedGroupId } : undefined,
       include: {
         checkIns: {
           orderBy: { timestamp: 'desc' },
@@ -249,7 +300,7 @@ app.get('/api/users', async (req, res) => {
     res.json({ success: true, count: users.length, data: users })
   } catch (error) {
     console.error('Error fetching users:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -257,6 +308,9 @@ app.get('/api/users', async (req, res) => {
 app.get('/api/users/:id', async (req, res) => {
   try {
     const { id } = req.params
+    if (!id || id.length > 100) {
+      return res.status(400).json({ success: false, error: 'Invalid user ID' })
+    }
     const user = await prisma.user.findUnique({
       where: { id },
       include: {
@@ -274,7 +328,7 @@ app.get('/api/users/:id', async (req, res) => {
     res.json({ success: true, data: user })
   } catch (error) {
     console.error('Error fetching user:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -420,6 +474,12 @@ app.get('/api/risk/:userId', async (req, res) => {
     }
 
     const trimmedUserId = userId.trim()
+    if (trimmedUserId.length > 100) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId must not exceed 100 characters',
+      })
+    }
     const user = await prisma.user.findUnique({
       where: { id: trimmedUserId },
     })
@@ -455,7 +515,7 @@ app.get('/api/risk/:userId', async (req, res) => {
     })
   } catch (error) {
     console.error('Error computing risk score:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -464,8 +524,8 @@ app.get('/api/checkins', async (req, res) => {
   try {
     const { userId, familyGroupId, type, limit } = req.query
     const where = {}
-    if (userId) where.userId = String(userId)
-    if (familyGroupId) where.user = { familyGroupId: String(familyGroupId) }
+    if (userId) where.userId = String(userId).slice(0, 100)
+    if (familyGroupId) where.user = { familyGroupId: String(familyGroupId).slice(0, 100) }
     if (type) {
       const normalizedType = String(type).trim().toUpperCase()
       if (ALLOWED_CHECKIN_TYPES.includes(normalizedType)) {
@@ -485,7 +545,7 @@ app.get('/api/checkins', async (req, res) => {
     res.json({ success: true, count: checkIns.length, data: checkIns })
   } catch (error) {
     console.error('Error fetching check-ins:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -503,6 +563,20 @@ const handleCreateCheckIn = async (req, res) => {
       })
     }
 
+    if (typeof userId !== 'string' || userId.trim().length > 100) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId must be a valid string not exceeding 100 characters',
+      })
+    }
+
+    if (trimmedStatus.length > 500) {
+      return res.status(400).json({
+        success: false,
+        error: 'status must not exceed 500 characters',
+      })
+    }
+
     if (!ALLOWED_CHECKIN_TYPES.includes(normalizedType)) {
       return res.status(400).json({
         success: false,
@@ -510,7 +584,8 @@ const handleCreateCheckIn = async (req, res) => {
       })
     }
 
-    const user = await prisma.user.findUnique({ where: { id: String(userId) } })
+    const trimmedUserId = userId.trim()
+    const user = await prisma.user.findUnique({ where: { id: trimmedUserId } })
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -520,7 +595,7 @@ const handleCreateCheckIn = async (req, res) => {
 
     const checkIn = await prisma.checkIn.create({
       data: {
-        userId: String(userId),
+        userId: trimmedUserId,
         type: normalizedType,
         status: trimmedStatus,
         timestamp: timestamp ? new Date(timestamp) : new Date(),
@@ -535,12 +610,12 @@ const handleCreateCheckIn = async (req, res) => {
       io.to(user.familyGroupId).emit('checkin:new', checkIn)
     }
 
-    clearAlertResolution(String(userId))
+    clearAlertResolution(trimmedUserId)
 
     res.status(201).json({ success: true, data: checkIn })
   } catch (error) {
     console.error('Error creating check-in:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 }
 
@@ -577,7 +652,7 @@ app.get('/api/alerts', async (req, res) => {
     res.json({ success: true, count: alertsWithPriority.length, data: alertsWithPriority })
   } catch (error) {
     console.error('Error fetching alerts:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -589,6 +664,13 @@ app.post('/api/alerts', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'userId and type (NO_CHECKIN/SOS) are required',
+      })
+    }
+
+    if (typeof userId !== 'string' || userId.trim().length > 100) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId must be a valid string not exceeding 100 characters',
       })
     }
 
@@ -606,7 +688,8 @@ app.post('/api/alerts', async (req, res) => {
       })
     }
 
-    const user = await prisma.user.findUnique({ where: { id: String(userId) } })
+    const trimmedUserId = userId.trim()
+    const user = await prisma.user.findUnique({ where: { id: trimmedUserId } })
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -616,7 +699,7 @@ app.post('/api/alerts', async (req, res) => {
 
     const alert = await prisma.alert.create({
       data: {
-        userId,
+        userId: trimmedUserId,
         type,
         status: status || 'ACTIVE',
         timestamp: timestamp ? new Date(timestamp) : new Date(),
@@ -641,7 +724,7 @@ app.post('/api/alerts', async (req, res) => {
     res.status(201).json({ success: true, data: alertPayload })
   } catch (error) {
     console.error('Error creating alert:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
@@ -657,6 +740,13 @@ app.post('/api/sos', async (req, res) => {
     }
 
     const trimmedUserId = userId.trim()
+    if (trimmedUserId.length > 100) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId must not exceed 100 characters',
+      })
+    }
+
     const user = await prisma.user.findUnique({
       where: { id: trimmedUserId },
     })
@@ -710,13 +800,19 @@ app.post('/api/sos', async (req, res) => {
     })
   } catch (error) {
     console.error('Error creating SOS alert:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
 // Update alert status (e.g. resolve)
 app.patch('/api/alerts/:id', async (req, res) => {
   const { id } = req.params
+  if (!id || typeof id !== 'string' || id.length > 100) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid alert ID',
+    })
+  }
   try {
     const { status } = req.body
     if (!status || !ALLOWED_ALERT_STATUSES.includes(status)) {
@@ -766,7 +862,7 @@ app.patch('/api/alerts/:id', async (req, res) => {
       })
     }
     console.error('Error updating alert:', error)
-    res.status(500).json({ success: false, error: error.message })
+    res.status(500).json({ success: false, error: 'Internal Server Error' })
   }
 })
 
