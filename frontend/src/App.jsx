@@ -1835,6 +1835,30 @@ export default function App() {
               </div>
             )}
 
+            {/* Multi-senior switcher for Family Dashboard */}
+            {effectiveSeniors.length > 1 && (
+              <div className="flex flex-wrap items-center gap-2 mb-4 bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs">
+                <span className="text-xs font-bold text-slate-500">Care Recipient:</span>
+                {effectiveSeniors.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedSeniorId(s.id)
+                      fetchRiskScore(s.id)
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                      s.id === seniorUser.id
+                        ? 'bg-slate-900 text-white shadow-xs'
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* 7-Day Rule-Based Health Risk Assessment with SVG Circular Ring */}
             <RiskScoreCard
               riskScore={riskData.riskScore}
@@ -1865,13 +1889,20 @@ export default function App() {
                     (a) => a.type === 'SOS' && a.status === 'ACTIVE'
                   )
                   const isGreen = senior.status === 'GREEN' && !hasSosAlert
+                  const isSelected = senior.id === seniorUser.id
                   const lastTime = senior.lastCheckInTime || senior.latestCheckIn?.timestamp
 
                   return (
                     <div
                       key={senior.id}
                       data-testid="senior-status-card"
-                      className={`relative overflow-hidden rounded-3xl border-3 transition-all duration-300 p-6 sm:p-8 shadow-sm ${
+                      onClick={() => {
+                        setSelectedSeniorId(senior.id)
+                        fetchRiskScore(senior.id)
+                      }}
+                      className={`relative overflow-hidden rounded-3xl border-3 transition-all duration-300 p-6 sm:p-8 shadow-sm cursor-pointer ${
+                        isSelected ? 'ring-2 ring-slate-800' : ''
+                      } ${
                         hasSosAlert
                           ? 'bg-gradient-to-br from-red-50 via-white to-rose-100 border-red-500 shadow-red-200 ring-2 ring-red-400/50'
                           : isGreen
