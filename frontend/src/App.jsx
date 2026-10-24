@@ -89,6 +89,7 @@ export default function App() {
   // Senior view quick-feedback state
   const [pendingButton, setPendingButton] = useState(null) // 'PILLS' | 'MEAL' | 'MOOD' | null
   const [checkInFeedback, setCheckInFeedback] = useState(null)
+  const [showSosConfirmDialog, setShowSosConfirmDialog] = useState(false)
 
   // Family dashboard form states
   const [customCheckInType, setCustomCheckInType] = useState('PILLS')
@@ -240,6 +241,78 @@ export default function App() {
         timestamp: newCheckIn.timestamp || new Date().toISOString(),
       })
     })
+
+    const triggerAudioVibrationAlert = () => {
+      try {
+        if (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext)) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext
+          const ctx = new AudioCtx()
+          const osc = ctx.createOscillator()
+          const gain = ctx.createGain()
+          osc.type = 'sawtooth'
+          osc.frequency.setValueAtTime(880, ctx.currentTime)
+          osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.3)
+          gain.gain.setValueAtTime(0.3, ctx.currentTime)
+          gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.3)
+          osc.connect(gain)
+          gain.connect(ctx.destination)
+          osc.start()
+          osc.stop(ctx.currentTime + 0.3)
+        }
+      } catch {}
+      try {
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate([200, 100, 200])
+        }
+      } catch {}
+    }
+
+    const handleSosAlert = (sosAlert) => {
+      const alertFamilyGroupId =
+        sosAlert.user?.familyGroupId ||
+        usersRef.current.find((u) => u.id === sosAlert.userId)?.familyGroupId
+      if (alertFamilyGroupId && alertFamilyGroupId !== activeFamilyGroupId) {
+        return
+      }
+
+      setAlerts((prev) => {
+        if (prev.some((a) => a.id === sosAlert.id)) {
+          return prev.map((a) => (a.id === sosAlert.id ? sosAlert : a))
+        }
+        return [sosAlert, ...prev]
+      })
+
+      setDashboardSeniors((prevSeniors) =>
+        prevSeniors.map((senior) => {
+          if (senior.id === sosAlert.userId) {
+            const existing = senior.activeAlerts || []
+            const updated = existing.some((a) => a.id === sosAlert.id)
+              ? existing.map((a) => (a.id === sosAlert.id ? sosAlert : a))
+              : [sosAlert, ...existing]
+            return {
+              ...senior,
+              status: 'RED',
+              statusColor: 'red',
+              hasActiveAlerts: true,
+              activeAlerts: updated,
+            }
+          }
+          return senior
+        })
+      )
+
+      triggerAudioVibrationAlert()
+
+      setLastLiveEvent({
+        id: sosAlert.id,
+        type: 'ALERT_SOS',
+        status: 'EMERGENCY SOS ALERT',
+        seniorName: sosAlert.user?.name || 'Senior',
+        timestamp: sosAlert.timestamp || new Date().toISOString(),
+      })
+    }
+
+    socket.on('alert:sos', handleSosAlert)
 
     socket.on('alert:new', (newAlert) => {
       // Ignore alerts for different family groups
@@ -500,7 +573,64 @@ export default function App() {
   }
 
   // Alert triggers
+  const handleTriggerSos = async () => {
+    setShowSosConfirmDialog(false)
+    setSubmittingAlert(true)
+    setErrorMsg(null)
+    try {
+      const seniorId = seniorUser.id || HARDCODED_SENIOR_USER_ID
+      const res = await fetch(`${API_BASE}/api/sos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: seniorId,
+        }),
+      })
+
+      if (res.ok) {
+        const json = await res.json()
+        const now = new Date()
+        const timeStr = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        setCheckInFeedback({
+          type: 'SOS',
+          title: '🚨 Emergency SOS Alert Sent!',
+          message: `Logged at ${timeStr}. Your family member ${familyUser.name} (${familyUser.phone}) has been notified immediately.`,
+        })
+
+        if (json.data) {
+          setAlerts((prev) => {
+            if (prev.some((a) => a.id === json.data.id)) return prev
+            return [json.data, ...prev]
+          })
+          setDashboardSeniors((prev) =>
+            prev.map((s) =>
+              s.id === seniorId
+                ? {
+                    ...s,
+                    status: 'RED',
+                    statusColor: 'red',
+                    hasActiveAlerts: true,
+                    activeAlerts: [json.data, ...(s.activeAlerts || []).filter((a) => a.id !== json.data.id)],
+                  }
+                : s
+            )
+          )
+        }
+      } else {
+        const err = await res.json()
+        setErrorMsg(err.error || 'Failed to trigger SOS alert')
+      }
+    } catch {
+      setErrorMsg('Failed to connect to backend server')
+    } finally {
+      setSubmittingAlert(false)
+    }
+  }
+
   const handleCreateAlert = async (type) => {
+    if (type === 'SOS') {
+      return handleTriggerSos()
+    }
     setSubmittingAlert(true)
     try {
       const res = await fetch(`${API_BASE}/api/alerts`, {
@@ -564,6 +694,15 @@ export default function App() {
       setResolvingAlertId(null)
     }
   }
+
+  const activeSosAlerts = alerts.filter((a) => {
+    if (a.type !== 'SOS' || a.status !== 'ACTIVE') return false
+    const alertFamilyGroupId =
+      a.user?.familyGroupId ||
+      users.find((u) => u.id === a.userId)?.familyGroupId ||
+      dashboardSeniors.find((s) => s.id === a.userId)?.familyGroupId
+    return !alertFamilyGroupId || alertFamilyGroupId === activeFamilyGroupId
+  })
 
   const activeNoCheckInAlerts = alerts.filter((a) => {
     if (a.type !== 'NO_CHECKIN' || a.status !== 'ACTIVE') return false
@@ -927,27 +1066,111 @@ export default function App() {
               </div>
             </div>
 
-            {/* Emergency Assistance Callout */}
-            <div className="bg-rose-50 border-2 border-rose-200 rounded-2xl p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center space-x-4">
-                <span className="text-4xl">🚨</span>
-                <div>
-                  <h4 className="text-lg font-bold text-rose-950">Need Immediate Help?</h4>
-                  <p className="text-xs sm:text-sm text-rose-800">
-                    Tap the emergency alert button to immediately send an urgent SOS notification to{' '}
-                    {familyUser.name}.
-                  </p>
+            {/* Large Red SOS Emergency Button */}
+            <div className="bg-gradient-to-br from-red-50 via-rose-50 to-red-100 border-3 border-red-400 rounded-3xl p-6 sm:p-8 shadow-sm">
+              <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                <div className="flex items-center space-x-4 text-center md:text-left">
+                  <div className="w-16 h-16 rounded-2xl bg-red-600 text-white flex items-center justify-center text-3xl shadow-md shrink-0">
+                    🚨
+                  </div>
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 bg-red-100 border border-red-300 px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wider text-red-800 mb-1">
+                      <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                      Emergency Assistance
+                    </div>
+                    <h3 className="text-xl sm:text-2xl font-black text-red-950 tracking-tight">
+                      Need Urgent Emergency Help?
+                    </h3>
+                    <p className="text-xs sm:text-sm text-red-800 mt-1">
+                      Pressing this button sends an immediate high-priority SOS alert to your family caregiver{' '}
+                      <strong>{familyUser.name}</strong> ({familyUser.phone}).
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="senior-sos-button"
+                  aria-label="Emergency SOS"
+                  onClick={() => setShowSosConfirmDialog(true)}
+                  disabled={submittingAlert}
+                  className="w-full md:w-auto shrink-0 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-black text-lg sm:text-xl px-8 py-5 rounded-2xl shadow-xl hover:shadow-2xl border-2 border-red-400 cursor-pointer transition-all duration-150 flex items-center justify-center gap-3 ring-4 ring-red-200"
+                >
+                  <span className="text-3xl select-none animate-bounce">🚨</span>
+                  <div className="text-left">
+                    <div className="leading-tight tracking-wider uppercase font-black text-xl">
+                      SOS Emergency
+                    </div>
+                    <div className="text-xs font-semibold text-red-100 tracking-normal normal-case">
+                      Tap to notify family
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Confirmation Dialog before firing SOS alert */}
+            {showSosConfirmDialog && (
+              <div
+                data-testid="sos-confirm-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="sos-confirm-title"
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs animate-fade-in"
+              >
+                <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border-4 border-red-500 space-y-6 text-center">
+                  <div className="w-20 h-20 mx-auto rounded-2xl bg-red-100 border-4 border-red-300 flex items-center justify-center text-4xl shadow-inner">
+                    🚨
+                  </div>
+
+                  <div className="space-y-2">
+                    <h3
+                      id="sos-confirm-title"
+                      className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight"
+                    >
+                      Send Emergency SOS Alert?
+                    </h3>
+                    <p className="text-slate-600 text-sm sm:text-base leading-relaxed">
+                      Are you sure you want to send an emergency SOS alert? This will immediately notify your
+                      family caregiver{' '}
+                      <strong className="text-slate-900 font-bold">{familyUser.name}</strong> ({familyUser.phone}) with high priority.
+                    </p>
+                  </div>
+
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 font-medium">
+                    ⚠️ Only send this alert if you are experiencing an emergency or need urgent help.
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                    <button
+                      type="button"
+                      data-testid="cancel-sos-button"
+                      onClick={() => setShowSosConfirmDialog(false)}
+                      className="w-full py-3.5 px-4 rounded-xl border-2 border-slate-300 hover:bg-slate-100 text-slate-700 font-extrabold text-sm sm:text-base transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+
+                    <button
+                      type="button"
+                      data-testid="confirm-sos-button"
+                      onClick={handleTriggerSos}
+                      disabled={submittingAlert}
+                      className="w-full py-3.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 active:scale-95 text-white font-black text-sm sm:text-base shadow-lg transition-colors cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      {submittingAlert ? (
+                        'Sending...'
+                      ) : (
+                        <>
+                          <span>🚨</span>
+                          <span>Yes, Send SOS</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => handleCreateAlert('SOS')}
-                disabled={submittingAlert}
-                className="w-full sm:w-auto bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-sm sm:text-base px-6 py-3 rounded-xl shadow-md cursor-pointer transition-colors active:scale-95"
-              >
-                {submittingAlert ? 'Triggering SOS...' : '🚨 Send SOS Alert'}
-              </button>
-            </div>
+            )}
 
             {/* Live Senior Activity Feed */}
             <div data-testid="senior-activity-feed" className="bg-white rounded-2xl p-6 sm:p-7 border border-slate-200 shadow-xs">
@@ -1070,6 +1293,72 @@ export default function App() {
               </div>
             )}
 
+            {/* Urgent SOS Emergency Alert Banner (Distinct styling, siren icon, Call Now button) */}
+            {activeSosAlerts.length > 0 && (
+              <div data-testid="sos-alerts-container" className="space-y-3">
+                {activeSosAlerts.map((alertItem) => {
+                  const senior =
+                    dashboardSeniors.find((s) => s.id === alertItem.userId) ||
+                    users.find((u) => u.id === alertItem.userId) ||
+                    seniorUser
+                  const seniorName = alertItem.user?.name || senior?.name || 'Senior Member'
+                  const seniorPhone = alertItem.user?.phone || senior?.phone || '+1-555-0143'
+
+                  return (
+                    <div
+                      key={alertItem.id}
+                      data-testid="sos-alert-banner"
+                      role="alert"
+                      className="p-5 sm:p-6 rounded-3xl bg-gradient-to-r from-red-700 via-rose-700 to-red-800 text-white shadow-2xl border-4 border-red-500 ring-4 ring-red-400/40 animate-fade-in flex flex-col md:flex-row md:items-center justify-between gap-5"
+                    >
+                      <div className="flex items-start sm:items-center space-x-4">
+                        <span
+                          role="img"
+                          aria-label="Siren icon"
+                          className="text-4xl sm:text-5xl select-none animate-bounce shrink-0"
+                        >
+                          🚨
+                        </span>
+                        <div>
+                          <div className="inline-flex items-center gap-1.5 bg-red-950/80 border border-red-400/70 px-3 py-0.5 rounded-full text-xs font-black uppercase tracking-wider text-red-200 mb-1.5">
+                            <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
+                            Emergency SOS • Immediate Action Required
+                          </div>
+                          <h3 className="font-black text-xl sm:text-2xl tracking-tight text-white leading-tight">
+                            🚨 EMERGENCY SOS: {seniorName} Needs Immediate Assistance!
+                          </h3>
+                          <p className="text-xs sm:text-sm text-red-100 mt-1 font-medium">
+                            SOS alert triggered {formatCheckInTime(alertItem.timestamp)}. Please contact {seniorName} right away.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3 shrink-0">
+                        <a
+                          href={`tel:${seniorPhone}`}
+                          data-testid="sos-call-now-button"
+                          className="inline-flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white font-black text-sm sm:text-base px-6 py-3.5 rounded-2xl shadow-lg border-2 border-emerald-300 transition-all cursor-pointer ring-2 ring-emerald-400/50"
+                        >
+                          <span>📞</span>
+                          <span>Call Now ({seniorPhone})</span>
+                        </a>
+
+                        <button
+                          type="button"
+                          data-testid="resolve-sos-button"
+                          onClick={() => handleResolveAlert(alertItem.id)}
+                          disabled={resolvingAlertId === alertItem.id}
+                          className="bg-white/90 hover:bg-white text-red-800 hover:text-red-950 font-extrabold text-xs sm:text-sm px-4 py-3.5 rounded-2xl shadow-xs transition-colors cursor-pointer border border-white/60"
+                        >
+                          {resolvingAlertId === alertItem.id ? 'Marking Resolved...' : 'Mark Resolved'}
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
             {/* Red Alert Banner for Missed Senior Check-In ('alert:new' event) */}
             {activeNoCheckInAlerts.length > 0 && (
               <div data-testid="no-checkin-alerts-container" className="space-y-3">
@@ -1168,9 +1457,14 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Status Badge (Green / Red) */}
+                        {/* Status Badge (Green / Red / SOS) */}
                         <div data-testid="senior-status-badge">
-                          {isGreen ? (
+                          {senior.activeAlerts?.some((a) => a.type === 'SOS') ? (
+                            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs sm:text-sm font-black bg-red-600 text-white border-2 border-red-700 shadow-md animate-pulse">
+                              <span className="text-base">🚨</span>
+                              <span>EMERGENCY SOS ACTIVE</span>
+                            </div>
+                          ) : isGreen ? (
                             <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs sm:text-sm font-extrabold bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-2xs">
                               <span className="relative flex h-3 w-3">
                                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
