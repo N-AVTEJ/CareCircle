@@ -79,6 +79,7 @@ app.get('/', (req, res) => {
       health: 'GET /health',
       dashboard: 'GET /api/dashboard/:familyGroupId',
       users: 'GET /api/users, GET /api/users/:id',
+      risk: 'GET /api/risk/:userId',
       checkin: 'POST /api/checkin',
       checkins: 'GET /api/checkins, POST /api/checkins',
       alerts: 'GET /api/alerts, POST /api/alerts, PATCH /api/alerts/:id',
@@ -273,6 +274,170 @@ app.get('/api/users/:id', async (req, res) => {
     res.json({ success: true, data: user })
   } catch (error) {
     console.error('Error fetching user:', error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
+// Rule-based risk score calculation for last 7 days of check-ins
+export function calculateRiskScore(checkIns = [], now = new Date()) {
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+
+  // Filter check-ins to the 7-day window
+  const recentCheckIns = checkIns.filter((c) => {
+    const ts = new Date(c.timestamp).getTime()
+    return !isNaN(ts) && ts >= sevenDaysAgo.getTime() && ts <= now.getTime() + 60000
+  })
+
+  // 1. skippedMeals = count of MEAL type with status 'Skipped'
+  const skippedMeals = recentCheckIns.filter((c) => {
+    if (c.type !== 'MEAL') return false
+    const s = String(c.status || '').toLowerCase().trim()
+    return s === 'skipped' || s.includes('skipped')
+  }).length
+
+  // Helper to determine if a pill status means taken
+  const isPillTaken = (status) => {
+    if (!status) return false
+    const s = String(status).toLowerCase().trim()
+    return (
+      s === 'yes' ||
+      s.startsWith('yes') ||
+      s === 'taken' ||
+      s.includes('pills taken') ||
+      s.includes('medication taken') ||
+      s.includes('dose taken')
+    )
+  }
+
+  // Helper for UTC date key 'YYYY-MM-DD'
+  const getUtcDateKey = (date) => {
+    const d = new Date(date)
+    return d.toISOString().slice(0, 10)
+  }
+
+  // 2. missedPills = count of PILLS type with status != 'Yes' (or no entry that day)
+  const missedPills = recentCheckIns.filter((c) => {
+    if (c.type !== 'PILLS') return false
+    return !isPillTaken(c.status)
+  }).length
+
+  // 3. badMoodStreak = consecutive most-recent days with MOOD status 'Not Good'
+  const isNotGoodMood = (status) => {
+    if (!status) return false
+    const s = String(status).toLowerCase().trim()
+    return (
+      s === 'not good' ||
+      s.includes('not good') ||
+      s === 'bad' ||
+      s.includes('distressed') ||
+      s.includes('sad') ||
+      s.includes('down')
+    )
+  }
+
+  const moodCheckIns = recentCheckIns
+    .filter((c) => c.type === 'MOOD')
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+
+  let badMoodStreak = 0
+  if (moodCheckIns.length > 0) {
+    const latestMoodByDay = new Map()
+    for (const c of moodCheckIns) {
+      const key = getUtcDateKey(c.timestamp)
+      if (!latestMoodByDay.has(key)) {
+        latestMoodByDay.set(key, c)
+      }
+    }
+
+    const sortedDays = Array.from(latestMoodByDay.keys()).sort((a, b) => b.localeCompare(a))
+    const mostRecentDay = sortedDays[0]
+    const mostRecentMood = latestMoodByDay.get(mostRecentDay)
+
+    if (mostRecentMood && isNotGoodMood(mostRecentMood.status)) {
+      badMoodStreak = 1
+      let currentDay = mostRecentDay
+
+      while (badMoodStreak < 7) {
+        const d = new Date(currentDay + 'T00:00:00.000Z')
+        d.setUTCDate(d.getUTCDate() - 1)
+        const prevDayKey = d.toISOString().slice(0, 10)
+
+        const prevMood = latestMoodByDay.get(prevDayKey)
+        if (prevMood && isNotGoodMood(prevMood.status)) {
+          badMoodStreak++
+          currentDay = prevDayKey
+        } else {
+          break
+        }
+      }
+    }
+  }
+
+  // 4. riskScore = min(100, missedPills*15 + skippedMeals*10 + badMoodStreak*20)
+  const rawScore = missedPills * 15 + skippedMeals * 10 + badMoodStreak * 20
+  const riskScore = Math.min(100, Math.max(0, rawScore))
+
+  // level: riskScore<40?'LOW':riskScore<70?'MEDIUM':'HIGH'
+  const level = riskScore < 40 ? 'LOW' : riskScore < 70 ? 'MEDIUM' : 'HIGH'
+
+  return {
+    riskScore,
+    breakdown: {
+      missedPills,
+      skippedMeals,
+      badMoodStreak,
+    },
+    level,
+  }
+}
+
+// GET /api/risk/:userId: Calculate rule-based risk score for senior user
+app.get('/api/risk/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params
+    if (!userId || !userId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId parameter is required',
+      })
+    }
+
+    const trimmedUserId = userId.trim()
+    const user = await prisma.user.findUnique({
+      where: { id: trimmedUserId },
+    })
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: `User with id '${trimmedUserId}' not found`,
+      })
+    }
+
+    const now = new Date()
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+
+    const checkIns = await prisma.checkIn.findMany({
+      where: {
+        userId: user.id,
+        timestamp: {
+          gte: sevenDaysAgo,
+        },
+      },
+      orderBy: { timestamp: 'desc' },
+    })
+
+    const riskData = calculateRiskScore(checkIns, now)
+
+    res.json({
+      success: true,
+      riskScore: riskData.riskScore,
+      breakdown: riskData.breakdown,
+      level: riskData.level,
+      data: riskData,
+    })
+  } catch (error) {
+    console.error('Error computing risk score:', error)
     res.status(500).json({ success: false, error: error.message })
   }
 })

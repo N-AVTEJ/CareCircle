@@ -12,6 +12,7 @@ import {
   recordAlertResolution,
   clearAlertResolution,
   lastAlertResolutionTime,
+  calculateRiskScore,
 } from '../src/index.js'
 import { io as Client } from 'socket.io-client'
 
@@ -1324,6 +1325,295 @@ test('GET /api/dashboard/:familyGroupId includes priority HIGH in senior.activeA
     await prisma.alert.deleteMany({ where: { id: createdAlert.id } })
   }
 })
+
+// ==============================================================
+// RISK SCORE TESTS (GET /api/risk/:userId & calculateRiskScore)
+// ==============================================================
+
+test('calculateRiskScore returns 0 and LOW level for empty check-ins', () => {
+  const result = calculateRiskScore([])
+  assert.equal(result.riskScore, 0)
+  assert.equal(result.level, 'LOW')
+  assert.deepEqual(result.breakdown, {
+    missedPills: 0,
+    skippedMeals: 0,
+    badMoodStreak: 0,
+  })
+})
+
+test('calculateRiskScore accurately weights skippedMeals (10 pts each)', () => {
+  const now = new Date()
+  const checkIns = [
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MEAL', status: 'Skipped lunch', timestamp: new Date(now.getTime() - 3600000) },
+    { type: 'MEAL', status: 'Finished healthy meal', timestamp: new Date(now.getTime() - 7200000) },
+  ]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.skippedMeals, 2)
+  assert.equal(result.riskScore, 20) // 2 * 10
+  assert.equal(result.level, 'LOW')
+})
+
+test('calculateRiskScore accurately weights missedPills (15 pts each) for status != Yes and no entry that day', () => {
+  const now = new Date()
+  const checkIns = [
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'Missed', timestamp: new Date(now.getTime() - 3600000) },
+    { type: 'PILLS', status: 'No entry that day', timestamp: new Date(now.getTime() - 7200000) },
+    { type: 'PILLS', status: 'Yes', timestamp: new Date(now.getTime() - 10800000) },
+  ]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.missedPills, 3) // 3 missed, 1 taken
+  assert.equal(result.riskScore, 45) // 3 * 15
+  assert.equal(result.level, 'MEDIUM')
+})
+
+test('calculateRiskScore accurately calculates badMoodStreak (20 pts each day)', () => {
+  const now = new Date()
+  const day1 = new Date(now.getTime() - 1 * 86400000)
+  const day2 = new Date(now.getTime() - 2 * 86400000)
+  const day3 = new Date(now.getTime() - 3 * 86400000)
+
+  // 3 consecutive days with Not Good mood
+  const checkIns = [
+    { type: 'MOOD', status: 'Not Good', timestamp: now },
+    { type: 'MOOD', status: 'Not Good', timestamp: day1 },
+    { type: 'MOOD', status: 'Not Good', timestamp: day2 },
+    { type: 'MOOD', status: 'Good & Cheerful', timestamp: day3 },
+  ]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.badMoodStreak, 3)
+  assert.equal(result.riskScore, 60) // 3 * 20
+  assert.equal(result.level, 'MEDIUM') // 40-69 is MEDIUM
+})
+
+test('calculateRiskScore resets badMoodStreak when most recent day is Good', () => {
+  const now = new Date()
+  const day1 = new Date(now.getTime() - 1 * 86400000)
+  const day2 = new Date(now.getTime() - 2 * 86400000)
+
+  // Most recent day is Good, previous days were Not Good
+  const checkIns = [
+    { type: 'MOOD', status: 'Feeling Good', timestamp: now },
+    { type: 'MOOD', status: 'Not Good', timestamp: day1 },
+    { type: 'MOOD', status: 'Not Good', timestamp: day2 },
+  ]
+  const result = calculateRiskScore(checkIns, now)
+  assert.equal(result.breakdown.badMoodStreak, 0)
+  assert.equal(result.riskScore, 0)
+  assert.equal(result.level, 'LOW')
+})
+
+test('calculateRiskScore respects score boundaries: LOW (<40), MEDIUM (40-69), HIGH (>=70, capped at 100)', () => {
+  const now = new Date()
+
+  // Score 35: 1 missed pill (15) + 2 skipped meals (20) = 35 -> LOW
+  const res35 = calculateRiskScore([
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+  ], now)
+  assert.equal(res35.riskScore, 35)
+  assert.equal(res35.level, 'LOW')
+
+  // Score 40: 2 missed pills (30) + 1 skipped meal (10) = 40 -> MEDIUM
+  const res40 = calculateRiskScore([
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+  ], now)
+  assert.equal(res40.riskScore, 40)
+  assert.equal(res40.level, 'MEDIUM')
+
+  // Score 65: 3 missed pills (45) + 2 skipped meals (20) = 65 -> MEDIUM
+  const res65 = calculateRiskScore([
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+  ], now)
+  assert.equal(res65.riskScore, 65)
+  assert.equal(res65.level, 'MEDIUM')
+
+  // Score 70: 2 missed pills (30) + 2 skipped meals (20) + 1 bad mood day (20) = 70 -> HIGH
+  const res70 = calculateRiskScore([
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MOOD', status: 'Not Good', timestamp: now },
+  ], now)
+  assert.equal(res70.riskScore, 70)
+  assert.equal(res70.level, 'HIGH')
+
+  // Score capped at 100
+  const res100 = calculateRiskScore([
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'PILLS', status: 'No', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MEAL', status: 'Skipped', timestamp: now },
+    { type: 'MOOD', status: 'Not Good', timestamp: now },
+  ], now)
+  assert.equal(res100.riskScore, 100)
+  assert.equal(res100.level, 'HIGH')
+})
+
+test('GET /api/risk/:userId returns 404 for non-existent userId', async () => {
+  const fakeId = '00000000-0000-0000-0000-000000000000'
+  const res = await fetch(`${baseUrl}/api/risk/${fakeId}`)
+  assert.equal(res.status, 404)
+  const json = await res.json()
+  assert.equal(json.success, false)
+  assert.ok(json.error.includes('not found'))
+})
+
+test('GET /api/risk/:userId returns 400 for whitespace-only userId', async () => {
+  const res = await fetch(`${baseUrl}/api/risk/%20%20`)
+  assert.equal(res.status, 400)
+  const json = await res.json()
+  assert.equal(json.success, false)
+  assert.ok(json.error.includes('required'))
+})
+
+test('GET /api/risk/:userId returns risk score and breakdown for seeded senior', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+  assert.ok(senior, 'Senior user must exist')
+
+  const res = await fetch(`${baseUrl}/api/risk/${senior.id}`)
+  assert.equal(res.status, 200)
+  const json = await res.json()
+
+  assert.equal(json.success, true)
+  assert.equal(typeof json.riskScore, 'number')
+  assert.ok(json.riskScore >= 0 && json.riskScore <= 100)
+  assert.ok(['LOW', 'MEDIUM', 'HIGH'].includes(json.level))
+  assert.ok(json.breakdown)
+  assert.equal(typeof json.breakdown.missedPills, 'number')
+  assert.equal(typeof json.breakdown.skippedMeals, 'number')
+  assert.equal(typeof json.breakdown.badMoodStreak, 'number')
+})
+
+test('GET /api/risk/:userId recomputes live when new bad check-ins are posted', async () => {
+  // 1. Create a dedicated senior user for isolation
+  const testSenior = await prisma.user.create({
+    data: {
+      name: 'Risk Test Senior',
+      role: 'SENIOR',
+      phone: '+1-555-9876',
+      familyGroupId: 'fam_group_risk_test',
+    },
+  })
+
+  try {
+    // Initial risk score with no adverse check-ins should be 0 (LOW)
+    const initialRes = await fetch(`${baseUrl}/api/risk/${testSenior.id}`)
+    assert.equal(initialRes.status, 200)
+    const initialJson = await initialRes.json()
+    assert.equal(initialJson.riskScore, 0)
+    assert.equal(initialJson.level, 'LOW')
+
+    // 2. Post a Skipped meal (+10 pts)
+    const mealRes = await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: testSenior.id,
+        type: 'MEAL',
+        status: 'Skipped',
+      }),
+    })
+    assert.equal(mealRes.status, 201)
+
+    // 3. Post a Not Good mood (+20 pts)
+    const moodRes = await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: testSenior.id,
+        type: 'MOOD',
+        status: 'Not Good',
+      }),
+    })
+    assert.equal(moodRes.status, 201)
+
+    // 4. Verify risk score is now 30 (10 + 20)
+    const after2Res = await fetch(`${baseUrl}/api/risk/${testSenior.id}`)
+    assert.equal(after2Res.status, 200)
+    const after2Json = await after2Res.json()
+    assert.equal(after2Json.riskScore, 30)
+    assert.equal(after2Json.level, 'LOW')
+    assert.equal(after2Json.breakdown.skippedMeals, 1)
+    assert.equal(after2Json.breakdown.badMoodStreak, 1)
+
+    // 5. Post a Missed Pill (+15 pts) -> 30 + 15 = 45 (transitions to MEDIUM!)
+    const pillRes = await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: testSenior.id,
+        type: 'PILLS',
+        status: 'No',
+      }),
+    })
+    assert.equal(pillRes.status, 201)
+
+    const after3Res = await fetch(`${baseUrl}/api/risk/${testSenior.id}`)
+    assert.equal(after3Res.status, 200)
+    const after3Json = await after3Res.json()
+    assert.equal(after3Json.riskScore, 45)
+    assert.equal(after3Json.level, 'MEDIUM')
+    assert.equal(after3Json.breakdown.missedPills, 1)
+
+    // 6. Post 2 more skipped meals (45 + 20 = 65) and 1 missed pill (65 + 15 = 80) -> transitions to HIGH!
+    await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: testSenior.id,
+        type: 'MEAL',
+        status: 'Skipped lunch',
+      }),
+    })
+    await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: testSenior.id,
+        type: 'MEAL',
+        status: 'Skipped dinner',
+      }),
+    })
+    await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: testSenior.id,
+        type: 'PILLS',
+        status: 'Missed evening medication',
+      }),
+    })
+
+    const highRes = await fetch(`${baseUrl}/api/risk/${testSenior.id}`)
+    assert.equal(highRes.status, 200)
+    const highJson = await highRes.json()
+    assert.equal(highJson.riskScore, 80) // 2*15 + 3*10 + 1*20 = 30 + 30 + 20 = 80
+    assert.equal(highJson.level, 'HIGH')
+    assert.equal(highJson.breakdown.missedPills, 2)
+    assert.equal(highJson.breakdown.skippedMeals, 3)
+    assert.equal(highJson.breakdown.badMoodStreak, 1)
+  } finally {
+    await prisma.checkIn.deleteMany({ where: { userId: testSenior.id } })
+    await prisma.user.deleteMany({ where: { id: testSenior.id } })
+  }
+})
+
 
 
 
