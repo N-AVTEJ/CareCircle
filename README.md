@@ -105,8 +105,11 @@ npm run build
 
 ### 7. Running Tests & Verification
 ```bash
-# Runs full test suite (22 automated tests covering health, users, check-ins, alerts, Socket.io room events, case-insensitivity, and validation)
+# Runs full test suite (27 automated tests covering health, dashboard endpoint, users, check-ins, alerts, Socket.io room events, case-insensitivity, and validation)
 npm test
+
+# Runs standalone Multi-Tab Real Browser DOM Live Sync Verification (Tab 1 Senior View check-in -> Tab 2 Family View live status card & feed update with ZERO refresh)
+npm run verify:dashboard
 
 # Runs standalone Senior Check-In & Socket.io Room Verification (including real Headless Browser DOM button clicks & PostgreSQL row verification)
 npm run verify:checkin
@@ -116,6 +119,7 @@ npm run verify:checkin
 
 - `GET /health` - Service health status
 - `GET /` - Root route (serves frontend in browser, or API catalog for API clients)
+- `GET /api/dashboard/:familyGroupId` - Get dashboard summary for a family group: returns latest check-in status per senior (`GREEN`/`RED`), last check-in timestamp, and recent check-ins list (supports `?limit=` and `?thresholdHours=`)
 - `GET /api/users` - Get all users (supports `?familyGroupId=` query)
 - `GET /api/users/:id` - Get single user with recent check-ins and alerts
 - `POST /api/checkin` - Create check-in (`userId`, `type` [PILLS/MEAL/MOOD case-insensitive], `status`), saves to `CheckIn` table and emits `checkin:new` to `familyGroupId`'s Socket.io room
@@ -125,11 +129,19 @@ npm run verify:checkin
 - `POST /api/alerts` - Create alert (`userId`, `type` [NO_CHECKIN/SOS], `status` [ACTIVE/RESOLVED])
 - `PATCH /api/alerts/:id` - Update alert status (`status` [ACTIVE/RESOLVED])
 
-## Real-Time Socket.io & Senior View
+## Real-Time Socket.io & Senior / Family Views
 
-- **Senior View (`/`)**: Displays 3 big, accessible 1-tap check-in buttons (**Pills**, **Meal**, **Mood**) for Senior user Eleanor Vance (`ffd75d01-03e9-4138-abd1-b095ac5ba212`). Includes double-click debounce prevention, toast auto-dismissal, and filtered activity isolation.
-- **Real-Time Sync**: When a check-in is submitted, backend saves a row in the `CheckIn` table and immediately broadcasts a `checkin:new` event to room `fam_group_carecircle_101`. Any connected family members see the live update immediately.
-- **Family Dashboard**: Toggle view to inspect family members, active alerts, trigger SOS/missed check-ins, and resolve alerts.
+- **Senior View (`/?view=senior`)**:
+  - Displays 3 big, accessible 1-tap check-in buttons (**Pills**, **Meal**, **Mood**) for Senior user Eleanor Vance (`ffd75d01-03e9-4138-abd1-b095ac5ba212`).
+  - Includes double-click debounce prevention, toast auto-dismissal, and filtered activity isolation.
+- **Family Dashboard View (`/?view=family`)**:
+  - **Senior Status Card (Green / Red)**:
+    - **GREEN (`SAFE • CHECKED IN`)**: Displayed with glowing emerald border and live badge when the senior has checked in recently (within 24 hours). Shows exact last check-in time (e.g. `Today at 8:55 pm`), relative time (`Just now`), and the activity note.
+    - **RED (`OVERDUE • ATTENTION NEEDED`)**: Displayed with rose border and alert badge when no check-in exists or when check-in is overdue past the safety threshold.
+  - **Live List of Check-Ins**:
+    - Real-time activity feed that automatically prepends new check-ins emitted on `checkin:new` without requiring any page reload or refresh.
+- **Multi-Tab Live Sync**:
+  - Opening the Senior view in Tab 1 and the Family view in Tab 2 demonstrates instant real-time synchronization. Tapping any check-in button in Tab 1 immediately updates the status card and live feed in Tab 2 via Socket.io room `fam_group_carecircle_101`.
 
 ## Verifying Seeded Data in Prisma Studio
 
