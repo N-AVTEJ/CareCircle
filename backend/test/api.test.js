@@ -198,6 +198,45 @@ test('POST /api/checkin rejects invalid check-in type with 400', async () => {
   assert.equal(json.success, false)
 })
 
+test('Senior view 3 buttons (Pills, Meal, Mood) post check-in and create row in CheckIn table', async () => {
+  const HARDCODED_SENIOR_USER_ID = 'ffd75d01-03e9-4138-abd1-b095ac5ba212'
+  const buttonConfigs = [
+    { type: 'PILLS', status: 'Morning medications taken' },
+    { type: 'MEAL', status: 'Finished a healthy meal' },
+    { type: 'MOOD', status: 'Feeling good and cheerful' },
+  ]
+
+  for (const config of buttonConfigs) {
+    const res = await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: HARDCODED_SENIOR_USER_ID,
+        type: config.type,
+        status: config.status,
+      }),
+    })
+    assert.equal(res.status, 201)
+    const json = await res.json()
+    assert.equal(json.success, true)
+    assert.equal(json.data.userId, HARDCODED_SENIOR_USER_ID)
+    assert.equal(json.data.type, config.type)
+    assert.equal(json.data.status, config.status)
+
+    // Verify row creation in CheckIn table
+    const dbRow = await prisma.checkIn.findUnique({
+      where: { id: json.data.id },
+      include: { user: true },
+    })
+    assert.ok(dbRow, `CheckIn row for ${config.type} must exist in DB table`)
+    assert.equal(dbRow.userId, HARDCODED_SENIOR_USER_ID)
+    assert.equal(dbRow.type, config.type)
+    assert.equal(dbRow.status, config.status)
+    assert.equal(dbRow.user.name, 'Eleanor Vance')
+    assert.equal(dbRow.user.familyGroupId, 'fam_group_carecircle_101')
+  }
+})
+
 test('POST /api/checkins creates a new check-in for senior', async () => {
   const usersRes = await fetch(`${baseUrl}/api/users`)
   const { data: users } = await usersRes.json()
