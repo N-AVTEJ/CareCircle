@@ -105,21 +105,21 @@ npm run build
 
 ### 7. Running Tests & Verification
 ```bash
-# Runs full test suite (18 automated tests covering health, users, check-ins, alerts, Socket.io room events, and validation)
+# Runs full test suite (22 automated tests covering health, users, check-ins, alerts, Socket.io room events, case-insensitivity, and validation)
 npm test
 
-# Runs standalone Senior Check-In & Socket.io Room Verification
+# Runs standalone Senior Check-In & Socket.io Room Verification (including real Headless Browser DOM button clicks & PostgreSQL row verification)
 npm run verify:checkin
 ```
 
 ## API Endpoints
 
 - `GET /health` - Service health status
-- `GET /` - API endpoint catalog
+- `GET /` - Root route (serves frontend in browser, or API catalog for API clients)
 - `GET /api/users` - Get all users (supports `?familyGroupId=` query)
 - `GET /api/users/:id` - Get single user with recent check-ins and alerts
-- `POST /api/checkin` - Create check-in (`userId`, `type` [PILLS/MEAL/MOOD], `status`), saves to `CheckIn` table and emits `checkin:new` to `familyGroupId`'s Socket.io room
-- `GET /api/checkins` - List check-ins (supports `?userId=`)
+- `POST /api/checkin` - Create check-in (`userId`, `type` [PILLS/MEAL/MOOD case-insensitive], `status`), saves to `CheckIn` table and emits `checkin:new` to `familyGroupId`'s Socket.io room
+- `GET /api/checkins` - List check-ins (supports `?userId=`, `?familyGroupId=`, `?type=`, `?limit=`)
 - `POST /api/checkins` - Create check-in alias
 - `GET /api/alerts` - List alerts (supports `?userId=`, `?status=`)
 - `POST /api/alerts` - Create alert (`userId`, `type` [NO_CHECKIN/SOS], `status` [ACTIVE/RESOLVED])
@@ -127,7 +127,7 @@ npm run verify:checkin
 
 ## Real-Time Socket.io & Senior View
 
-- **Senior View (`/`)**: Displays 3 big, accessible 1-tap check-in buttons (**Pills**, **Meal**, **Mood**) for Senior user Eleanor Vance (`ffd75d01-03e9-4138-abd1-b095ac5ba212`).
+- **Senior View (`/`)**: Displays 3 big, accessible 1-tap check-in buttons (**Pills**, **Meal**, **Mood**) for Senior user Eleanor Vance (`ffd75d01-03e9-4138-abd1-b095ac5ba212`). Includes double-click debounce prevention, toast auto-dismissal, and filtered activity isolation.
 - **Real-Time Sync**: When a check-in is submitted, backend saves a row in the `CheckIn` table and immediately broadcasts a `checkin:new` event to room `fam_group_carecircle_101`. Any connected family members see the live update immediately.
 - **Family Dashboard**: Toggle view to inspect family members, active alerts, trigger SOS/missed check-ins, and resolve alerts.
 
