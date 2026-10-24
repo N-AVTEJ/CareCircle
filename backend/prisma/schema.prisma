@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SENIOR
+  FAMILY
+}
+
+enum CheckInType {
+  PILLS
+  MEAL
+  MOOD
+}
+
+enum AlertType {
+  NO_CHECKIN
+  SOS
+}
+
+enum AlertStatus {
+  ACTIVE
+  RESOLVED
+}
+
+model User {
+  id            String    @id @default(uuid())
+  name          String
+  role          Role
+  phone         String
+  familyGroupId String
+  checkIns      CheckIn[]
+  alerts        Alert[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([familyGroupId])
+}
+
+model CheckIn {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      CheckInType
+  status    String
+  timestamp DateTime    @default(now())
+
+  @@index([userId])
+}
+
+model Alert {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      AlertType
+  status    AlertStatus @default(ACTIVE)
+  timestamp DateTime    @default(now())
+
+  @@index([userId])
+}
