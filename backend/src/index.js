@@ -173,10 +173,12 @@ app.get('/api/dashboard/:familyGroupId', async (req, res) => {
       const isCheckedInRecently = Boolean(
         latestCheckIn && now.getTime() - new Date(latestCheckIn.timestamp).getTime() <= thresholdMs
       )
+      const hasActiveAlerts = Boolean(senior.alerts && senior.alerts.length > 0)
+      const isSafe = isCheckedInRecently && !hasActiveAlerts
 
-      // Status is GREEN if senior checked in within threshold, otherwise RED
-      const status = isCheckedInRecently ? 'GREEN' : 'RED'
-      const statusColor = isCheckedInRecently ? 'green' : 'red'
+      // Status is GREEN if senior checked in within threshold and has no active alerts, otherwise RED
+      const status = isSafe ? 'GREEN' : 'RED'
+      const statusColor = isSafe ? 'green' : 'red'
 
       return {
         id: senior.id,
@@ -347,6 +349,8 @@ const handleCreateCheckIn = async (req, res) => {
       io.to(user.familyGroupId).emit('checkin:new', checkIn)
     }
 
+    clearAlertResolution(String(userId))
+
     res.status(201).json({ success: true, data: checkIn })
   } catch (error) {
     console.error('Error creating check-in:', error)
@@ -361,10 +365,16 @@ app.post('/api/checkins', handleCreateCheckIn)
 app.get('/api/alerts', async (req, res) => {
   try {
     const { userId, status, familyGroupId } = req.query
+    if (status && !ALLOWED_ALERT_STATUSES.includes(String(status).trim().toUpperCase())) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid status '${status}'. Allowed statuses: ${ALLOWED_ALERT_STATUSES.join(', ')}`,
+      })
+    }
     const alerts = await prisma.alert.findMany({
       where: {
         ...(userId ? { userId: String(userId) } : {}),
-        ...(status ? { status } : {}),
+        ...(status ? { status: String(status).trim().toUpperCase() } : {}),
         ...(familyGroupId ? { user: { familyGroupId: String(familyGroupId) } } : {}),
       },
       orderBy: { timestamp: 'desc' },
@@ -460,6 +470,11 @@ app.patch('/api/alerts/:id', async (req, res) => {
       },
     })
 
+    // Record resolution time to enforce cooldown before any re-alerting
+    if (status === 'RESOLVED') {
+      recordAlertResolution(updatedAlert.userId)
+    }
+
     // Emit Socket.io events when alert is updated/resolved
     if (updatedAlert.user?.familyGroupId) {
       io.to(updatedAlert.user.familyGroupId).emit('alert:updated', updatedAlert)
@@ -492,6 +507,21 @@ app.patch('/api/alerts/:id', async (req, res) => {
 // ==============================================================
 export const DEFAULT_CHECKIN_THRESHOLD_MS =
   parseInt(process.env.CHECKIN_THRESHOLD_MS, 10) || 2 * 60 * 1000
+
+// Map to track resolution timestamp per senior to ensure a full grace window
+export const lastAlertResolutionTime = new Map()
+
+export function recordAlertResolution(userId) {
+  if (userId) {
+    lastAlertResolutionTime.set(String(userId), Date.now())
+  }
+}
+
+export function clearAlertResolution(userId) {
+  if (userId) {
+    lastAlertResolutionTime.delete(String(userId))
+  }
+}
 
 export async function checkSeniorCheckIns(thresholdMs = DEFAULT_CHECKIN_THRESHOLD_MS) {
   const now = new Date()
@@ -528,7 +558,13 @@ export async function checkSeniorCheckIns(thresholdMs = DEFAULT_CHECKIN_THRESHOL
         continue
       }
 
-      // 2. Skip if a NO_CHECKIN alert was recently created within thresholdMs
+      // 2. Skip if an alert was resolved within thresholdMs (resolution cooldown window)
+      const lastResolved = lastAlertResolutionTime.get(senior.id)
+      if (lastResolved && now.getTime() - lastResolved < thresholdMs) {
+        continue
+      }
+
+      // 3. Skip if a NO_CHECKIN alert was recently created within thresholdMs
       const recentAlert = await prisma.alert.findFirst({
         where: {
           userId: senior.id,
@@ -543,7 +579,7 @@ export async function checkSeniorCheckIns(thresholdMs = DEFAULT_CHECKIN_THRESHOL
         continue
       }
 
-      // 3. Create Alert row (type NO_CHECKIN, status ACTIVE)
+      // 4. Create Alert row (type NO_CHECKIN, status ACTIVE)
       const alert = await prisma.alert.create({
         data: {
           userId: senior.id,
@@ -558,7 +594,7 @@ export async function checkSeniorCheckIns(thresholdMs = DEFAULT_CHECKIN_THRESHOL
 
       createdAlerts.push(alert)
 
-      // 4. Emit 'alert:new' via Socket.io to senior's familyGroupId room
+      // 5. Emit 'alert:new' via Socket.io to senior's familyGroupId room
       if (senior.familyGroupId) {
         io.to(senior.familyGroupId).emit('alert:new', alert)
       } else {
@@ -571,6 +607,7 @@ export async function checkSeniorCheckIns(thresholdMs = DEFAULT_CHECKIN_THRESHOL
 }
 
 let cronTask = null
+let isChecking = false
 
 export function startCheckInCron(
   cronExpression = '* * * * *',
@@ -580,10 +617,14 @@ export function startCheckInCron(
     return cronTask
   }
   cronTask = cron.schedule(cronExpression, async () => {
+    if (isChecking) return
+    isChecking = true
     try {
       await checkSeniorCheckIns(thresholdMs)
     } catch (err) {
       console.error('Error executing checkSeniorCheckIns cron job:', err)
+    } finally {
+      isChecking = false
     }
   })
   return cronTask
@@ -594,6 +635,7 @@ export function stopCheckInCron() {
     cronTask.stop()
     cronTask = null
   }
+  isChecking = false
 }
 
 const isMain =

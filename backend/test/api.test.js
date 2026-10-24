@@ -9,6 +9,9 @@ import {
   startCheckInCron,
   stopCheckInCron,
   DEFAULT_CHECKIN_THRESHOLD_MS,
+  recordAlertResolution,
+  clearAlertResolution,
+  lastAlertResolutionTime,
 } from '../src/index.js'
 import { io as Client } from 'socket.io-client'
 
@@ -875,6 +878,198 @@ test('startCheckInCron schedules cron and stopCheckInCron cancels it', () => {
   assert.ok(task, 'startCheckInCron must return scheduled task')
   stopCheckInCron()
 })
+
+test('GET /api/alerts rejects invalid ?status= with 400', async () => {
+  const res = await fetch(`${baseUrl}/api/alerts?status=INVALID_STATUS`)
+  assert.equal(res.status, 400)
+  const json = await res.json()
+  assert.equal(json.success, false)
+  assert.ok(json.error.includes('Allowed statuses'))
+})
+
+test('GET /api/alerts filters by familyGroupId', async () => {
+  const groupA = `test_alerts_group_a_${Date.now()}`
+  const groupB = `test_alerts_group_b_${Date.now()}`
+
+  const userA = await prisma.user.create({
+    data: {
+      name: 'User In Group A',
+      role: 'SENIOR',
+      phone: '+1-555-8001',
+      familyGroupId: groupA,
+    },
+  })
+
+  const userB = await prisma.user.create({
+    data: {
+      name: 'User In Group B',
+      role: 'SENIOR',
+      phone: '+1-555-8002',
+      familyGroupId: groupB,
+    },
+  })
+
+  const alertA = await prisma.alert.create({
+    data: {
+      userId: userA.id,
+      type: 'NO_CHECKIN',
+      status: 'ACTIVE',
+    },
+  })
+
+  const alertB = await prisma.alert.create({
+    data: {
+      userId: userB.id,
+      type: 'SOS',
+      status: 'ACTIVE',
+    },
+  })
+
+  try {
+    const resA = await fetch(`${baseUrl}/api/alerts?familyGroupId=${groupA}`)
+    assert.equal(resA.status, 200)
+    const jsonA = await resA.json()
+    assert.ok(jsonA.data.some((a) => a.id === alertA.id), 'Group A alerts must include alertA')
+    assert.ok(!jsonA.data.some((a) => a.id === alertB.id), 'Group A alerts must NOT include alertB')
+
+    const resB = await fetch(`${baseUrl}/api/alerts?familyGroupId=${groupB}`)
+    assert.equal(resB.status, 200)
+    const jsonB = await resB.json()
+    assert.ok(jsonB.data.some((a) => a.id === alertB.id), 'Group B alerts must include alertB')
+    assert.ok(!jsonB.data.some((a) => a.id === alertA.id), 'Group B alerts must NOT include alertA')
+  } finally {
+    await prisma.alert.deleteMany({ where: { id: { in: [alertA.id, alertB.id] } } })
+    await prisma.user.deleteMany({ where: { id: { in: [userA.id, userB.id] } } })
+  }
+})
+
+test('GET /api/dashboard/:familyGroupId returns RED status when senior has an active alert even with recent check-in, and transitions to GREEN when resolved', async () => {
+  const testGroupId = `active_alert_group_${Date.now()}`
+  const senior = await prisma.user.create({
+    data: {
+      name: 'Alert Senior With Checkin',
+      role: 'SENIOR',
+      phone: '+1-555-8101',
+      familyGroupId: testGroupId,
+    },
+  })
+
+  // Recent check-in from 10 seconds ago
+  const freshCheckIn = await prisma.checkIn.create({
+    data: {
+      userId: senior.id,
+      type: 'PILLS',
+      status: 'Pills taken 10 seconds ago',
+      timestamp: new Date(),
+    },
+  })
+
+  // Active NO_CHECKIN alert
+  const alert = await prisma.alert.create({
+    data: {
+      userId: senior.id,
+      type: 'NO_CHECKIN',
+      status: 'ACTIVE',
+      timestamp: new Date(),
+    },
+  })
+
+  try {
+    // 1. Dashboard must report RED status because an active alert exists
+    const resActive = await fetch(`${baseUrl}/api/dashboard/${testGroupId}`)
+    assert.equal(resActive.status, 200)
+    const jsonActive = await resActive.json()
+    const seniorActive = jsonActive.data.seniors.find((s) => s.id === senior.id)
+    assert.ok(seniorActive)
+    assert.equal(seniorActive.status, 'RED', 'Senior status must be RED when active alert exists')
+    assert.equal(seniorActive.statusColor, 'red')
+    assert.equal(seniorActive.hasActiveAlerts, true)
+    assert.equal(jsonActive.data.status, 'RED', 'Overall dashboard status must be RED')
+
+    // 2. Mark alert RESOLVED via PATCH /api/alerts/:id
+    const resPatch = await fetch(`${baseUrl}/api/alerts/${alert.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'RESOLVED' }),
+    })
+    assert.equal(resPatch.status, 200)
+
+    // 3. Dashboard must now report GREEN status
+    const resResolved = await fetch(`${baseUrl}/api/dashboard/${testGroupId}`)
+    assert.equal(resResolved.status, 200)
+    const jsonResolved = await resResolved.json()
+    const seniorResolved = jsonResolved.data.seniors.find((s) => s.id === senior.id)
+    assert.ok(seniorResolved)
+    assert.equal(seniorResolved.status, 'GREEN', 'Senior status must transition to GREEN when alert is resolved')
+    assert.equal(seniorResolved.statusColor, 'green')
+    assert.equal(seniorResolved.hasActiveAlerts, false)
+    assert.equal(jsonResolved.data.status, 'GREEN')
+  } finally {
+    await prisma.alert.deleteMany({ where: { userId: senior.id } })
+    await prisma.checkIn.deleteMany({ where: { userId: senior.id } })
+    await prisma.user.deleteMany({ where: { id: senior.id } })
+  }
+})
+
+test('checkSeniorCheckIns respects post-resolution cooldown to prevent immediate duplicate alerts', async () => {
+  const testGroupId = `cooldown_group_${Date.now()}`
+  const senior = await prisma.user.create({
+    data: {
+      name: 'Cooldown Senior',
+      role: 'SENIOR',
+      phone: '+1-555-8201',
+      familyGroupId: testGroupId,
+    },
+  })
+
+  // Check-in from 3 minutes ago (gap > 2 min)
+  await prisma.checkIn.create({
+    data: {
+      userId: senior.id,
+      type: 'MEAL',
+      status: 'Meal from 3 minutes ago',
+      timestamp: new Date(Date.now() - 3 * 60 * 1000),
+    },
+  })
+
+  try {
+    // 1. First run creates alert
+    const created = await checkSeniorCheckIns(2 * 60 * 1000)
+    const alert = created.find((a) => a.userId === senior.id)
+    assert.ok(alert, 'Alert must be created on first gap detection')
+
+    // 2. Resolve alert
+    const patchRes = await fetch(`${baseUrl}/api/alerts/${alert.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'RESOLVED' }),
+    })
+    assert.equal(patchRes.status, 200)
+
+    // 3. Immediately run checkSeniorCheckIns again while gap > 2 min still holds
+    const secondPass = await checkSeniorCheckIns(2 * 60 * 1000)
+    const dupAlert = secondPass.find((a) => a.userId === senior.id)
+    assert.equal(dupAlert, undefined, 'Must NOT immediately create new alert during post-resolution cooldown window')
+
+    // 4. Log a fresh check-in and verify cooldown is cleared
+    await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: senior.id,
+        type: 'PILLS',
+        status: 'Fresh check-in',
+      }),
+    })
+    assert.equal(lastAlertResolutionTime.has(senior.id), false, 'Cooldown tracking must be cleared on fresh checkin')
+  } finally {
+    clearAlertResolution(senior.id)
+    await prisma.alert.deleteMany({ where: { userId: senior.id } })
+    await prisma.checkIn.deleteMany({ where: { userId: senior.id } })
+    await prisma.user.deleteMany({ where: { id: senior.id } })
+  }
+})
+
 
 
 
