@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { io } from 'socket.io-client'
 
 const API_BASE = ''
@@ -72,6 +72,10 @@ export default function App() {
   })
 
   const [users, setUsers] = useState([])
+  const usersRef = useRef(users)
+  useEffect(() => {
+    usersRef.current = users
+  }, [users])
   const [dashboardSeniors, setDashboardSeniors] = useState([])
   const [checkIns, setCheckIns] = useState([])
   const [alerts, setAlerts] = useState([])
@@ -241,7 +245,7 @@ export default function App() {
       // Ignore alerts for different family groups
       const alertFamilyGroupId =
         newAlert.user?.familyGroupId ||
-        users.find((u) => u.id === newAlert.userId)?.familyGroupId
+        usersRef.current.find((u) => u.id === newAlert.userId)?.familyGroupId
       if (alertFamilyGroupId && alertFamilyGroupId !== activeFamilyGroupId) {
         return
       }
