@@ -68,6 +68,7 @@ app.get('/', (req, res) => {
     message: 'Welcome to CareCircle API',
     endpoints: {
       health: 'GET /health',
+      dashboard: 'GET /api/dashboard/:familyGroupId',
       users: 'GET /api/users, GET /api/users/:id',
       checkin: 'POST /api/checkin',
       checkins: 'GET /api/checkins, POST /api/checkins',
@@ -79,6 +80,114 @@ app.get('/', (req, res) => {
 const ALLOWED_CHECKIN_TYPES = ['PILLS', 'MEAL', 'MOOD']
 const ALLOWED_ALERT_TYPES = ['NO_CHECKIN', 'SOS']
 const ALLOWED_ALERT_STATUSES = ['ACTIVE', 'RESOLVED']
+
+// Get dashboard summary for a family group (seniors with latest check-in status + recent check-ins)
+app.get('/api/dashboard/:familyGroupId', async (req, res) => {
+  try {
+    const { familyGroupId } = req.params
+    if (!familyGroupId || !familyGroupId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'familyGroupId parameter is required',
+      })
+    }
+
+    const trimmedGroupId = familyGroupId.trim()
+    const limit = req.query.limit ? Math.min(parseInt(req.query.limit, 10) || 20, 100) : 20
+    const thresholdHours = req.query.thresholdHours ? parseFloat(req.query.thresholdHours) : 24
+
+    // 1. Fetch all seniors in this family group
+    const seniors = await prisma.user.findMany({
+      where: {
+        familyGroupId: trimmedGroupId,
+        role: 'SENIOR',
+      },
+      include: {
+        checkIns: {
+          orderBy: { timestamp: 'desc' },
+          take: 5,
+        },
+        alerts: {
+          where: { status: 'ACTIVE' },
+          orderBy: { timestamp: 'desc' },
+        },
+      },
+      orderBy: { name: 'asc' },
+    })
+
+    // 2. Fetch recent check-ins for the entire family group
+    const recentCheckIns = await prisma.checkIn.findMany({
+      where: {
+        user: {
+          familyGroupId: trimmedGroupId,
+        },
+      },
+      orderBy: { timestamp: 'desc' },
+      take: limit,
+      include: {
+        user: {
+          select: { id: true, name: true, role: true, familyGroupId: true, phone: true },
+        },
+      },
+    })
+
+    const now = new Date()
+    const thresholdMs = thresholdHours * 60 * 60 * 1000
+
+    // 3. Compute latest check-in status per senior
+    const seniorStatuses = seniors.map((senior) => {
+      const latestCheckIn = senior.checkIns[0] || null
+      const lastCheckInTime = latestCheckIn ? latestCheckIn.timestamp : null
+
+      const isCheckedInRecently = Boolean(
+        latestCheckIn && now.getTime() - new Date(latestCheckIn.timestamp).getTime() <= thresholdMs
+      )
+
+      // Status is GREEN if senior checked in within threshold, otherwise RED
+      const status = isCheckedInRecently ? 'GREEN' : 'RED'
+      const statusColor = isCheckedInRecently ? 'green' : 'red'
+
+      return {
+        id: senior.id,
+        name: senior.name,
+        role: senior.role,
+        phone: senior.phone,
+        familyGroupId: senior.familyGroupId,
+        status,
+        statusColor,
+        isCheckedInRecently,
+        latestCheckIn,
+        lastCheckInTime,
+        activeAlerts: senior.alerts,
+        hasActiveAlerts: senior.alerts.length > 0,
+        recentCheckIns: senior.checkIns,
+      }
+    })
+
+    const primarySenior = seniorStatuses[0] || null
+
+    res.json({
+      success: true,
+      data: {
+        familyGroupId: trimmedGroupId,
+        seniors: seniorStatuses,
+        recentCheckIns,
+        senior: primarySenior,
+        latestCheckIn: primarySenior?.latestCheckIn || null,
+        lastCheckInTime: primarySenior?.lastCheckInTime || null,
+        status: primarySenior?.status || (seniorStatuses.length > 0 ? 'RED' : 'NONE'),
+        statusColor: primarySenior?.statusColor || (seniorStatuses.length > 0 ? 'red' : 'gray'),
+      },
+      seniors: seniorStatuses,
+      recentCheckIns,
+      latestCheckIn: primarySenior?.latestCheckIn || null,
+      status: primarySenior?.status || (seniorStatuses.length > 0 ? 'RED' : 'NONE'),
+    })
+  } catch (error) {
+    console.error('Error fetching dashboard:', error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
 
 // Get all users (optional ?familyGroupId= filter)
 app.get('/api/users', async (req, res) => {

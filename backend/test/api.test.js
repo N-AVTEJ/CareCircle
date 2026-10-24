@@ -477,3 +477,142 @@ test('Socket.io client receives checkin:new when connecting via auth.familyGroup
   socketAuth.disconnect()
 })
 
+test('GET /api/dashboard/:familyGroupId returns latest check-in status per senior and recent check-ins list', async () => {
+  const usersRes = await fetch(`${baseUrl}/api/users`)
+  const { data: users } = await usersRes.json()
+  const senior = users.find((u) => u.role === 'SENIOR')
+
+  // Post a fresh check-in to ensure a recent check-in exists
+  await fetch(`${baseUrl}/api/checkin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: senior.id,
+      type: 'MOOD',
+      status: 'Feeling energetic and joyful',
+    }),
+  })
+
+  const res = await fetch(`${baseUrl}/api/dashboard/${senior.familyGroupId}`)
+  assert.equal(res.status, 200)
+  const json = await res.json()
+
+  assert.equal(json.success, true)
+  assert.equal(json.data.familyGroupId, senior.familyGroupId)
+  assert.ok(Array.isArray(json.data.seniors), 'seniors must be an array')
+  assert.ok(json.data.seniors.length >= 1, 'at least 1 senior returned')
+
+  const seniorData = json.data.seniors.find((s) => s.id === senior.id)
+  assert.ok(seniorData, 'Senior Eleanor must be in dashboard seniors list')
+  assert.equal(seniorData.name, senior.name)
+  assert.equal(seniorData.role, 'SENIOR')
+  assert.equal(seniorData.status, 'GREEN')
+  assert.equal(seniorData.statusColor, 'green')
+  assert.equal(seniorData.isCheckedInRecently, true)
+  assert.ok(seniorData.latestCheckIn, 'latestCheckIn must exist')
+  assert.equal(seniorData.latestCheckIn.type, 'MOOD')
+  assert.equal(seniorData.latestCheckIn.status, 'Feeling energetic and joyful')
+  assert.ok(seniorData.lastCheckInTime, 'lastCheckInTime must be defined')
+
+  // Verify recentCheckIns list
+  assert.ok(Array.isArray(json.data.recentCheckIns))
+  assert.ok(json.data.recentCheckIns.length > 0)
+  assert.equal(json.data.recentCheckIns[0].status, 'Feeling energetic and joyful')
+})
+
+test('GET /api/dashboard/:familyGroupId returns RED status when senior has no check-ins or overdue check-ins', async () => {
+  const testGroupId = `test_fam_group_${Date.now()}`
+  const overdueSenior = await prisma.user.create({
+    data: {
+      name: 'Overdue Senior Tester',
+      role: 'SENIOR',
+      phone: '+1-555-9999',
+      familyGroupId: testGroupId,
+    },
+  })
+
+  try {
+    // 1. No check-ins at all -> status should be RED
+    const resNoCheckins = await fetch(`${baseUrl}/api/dashboard/${testGroupId}`)
+    assert.equal(resNoCheckins.status, 200)
+    const jsonNoCheckins = await resNoCheckins.json()
+    assert.equal(jsonNoCheckins.success, true)
+    assert.equal(jsonNoCheckins.data.seniors.length, 1)
+    const seniorItem = jsonNoCheckins.data.seniors[0]
+    assert.equal(seniorItem.status, 'RED')
+    assert.equal(seniorItem.statusColor, 'red')
+    assert.equal(seniorItem.isCheckedInRecently, false)
+    assert.equal(seniorItem.latestCheckIn, null)
+    assert.equal(seniorItem.lastCheckInTime, null)
+
+    // 2. Add an overdue check-in from 3 days ago (72 hours ago)
+    const threeDaysAgo = new Date(Date.now() - 72 * 60 * 60 * 1000)
+    await prisma.checkIn.create({
+      data: {
+        userId: overdueSenior.id,
+        type: 'PILLS',
+        status: 'Old medication from days ago',
+        timestamp: threeDaysAgo,
+      },
+    })
+
+    const resOldCheckin = await fetch(`${baseUrl}/api/dashboard/${testGroupId}`)
+    const jsonOldCheckin = await resOldCheckin.json()
+    const seniorItemOld = jsonOldCheckin.data.seniors[0]
+    assert.equal(seniorItemOld.status, 'RED')
+    assert.equal(seniorItemOld.statusColor, 'red')
+    assert.equal(seniorItemOld.isCheckedInRecently, false)
+    assert.ok(seniorItemOld.latestCheckIn)
+    assert.equal(seniorItemOld.latestCheckIn.status, 'Old medication from days ago')
+
+    // 3. Now add a fresh check-in today -> status turns GREEN
+    await fetch(`${baseUrl}/api/checkin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: overdueSenior.id,
+        type: 'MEAL',
+        status: 'Fresh warm meal just eaten',
+      }),
+    })
+
+    const resFresh = await fetch(`${baseUrl}/api/dashboard/${testGroupId}`)
+    const jsonFresh = await resFresh.json()
+    const seniorItemFresh = jsonFresh.data.seniors[0]
+    assert.equal(seniorItemFresh.status, 'GREEN')
+    assert.equal(seniorItemFresh.statusColor, 'green')
+    assert.equal(seniorItemFresh.isCheckedInRecently, true)
+    assert.equal(seniorItemFresh.latestCheckIn.type, 'MEAL')
+    assert.equal(seniorItemFresh.latestCheckIn.status, 'Fresh warm meal just eaten')
+  } finally {
+    await prisma.checkIn.deleteMany({ where: { userId: overdueSenior.id } })
+    await prisma.user.delete({ where: { id: overdueSenior.id } })
+  }
+})
+
+test('GET /api/dashboard/:familyGroupId supports ?limit= query parameter', async () => {
+  const res = await fetch(`${baseUrl}/api/dashboard/fam_group_carecircle_101?limit=2`)
+  assert.equal(res.status, 200)
+  const json = await res.json()
+  assert.equal(json.success, true)
+  assert.ok(json.data.recentCheckIns.length <= 2)
+})
+
+test('GET /api/dashboard/:familyGroupId rejects whitespace-only familyGroupId with 400', async () => {
+  const res = await fetch(`${baseUrl}/api/dashboard/%20%20%20`)
+  assert.equal(res.status, 400)
+  const json = await res.json()
+  assert.equal(json.success, false)
+  assert.ok(json.error.includes('familyGroupId'))
+})
+
+test('GET /api/dashboard/:familyGroupId returns empty list for unknown family group', async () => {
+  const res = await fetch(`${baseUrl}/api/dashboard/non_existent_family_group_xyz`)
+  assert.equal(res.status, 200)
+  const json = await res.json()
+  assert.equal(json.success, true)
+  assert.equal(json.data.seniors.length, 0)
+  assert.equal(json.data.recentCheckIns.length, 0)
+})
+
+
