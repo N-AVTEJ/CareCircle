@@ -7,6 +7,7 @@ import express from 'express'
 import cors from 'cors'
 import { Server } from 'socket.io'
 import { PrismaClient } from '@prisma/client'
+import cron from 'node-cron'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -356,14 +357,15 @@ const handleCreateCheckIn = async (req, res) => {
 app.post('/api/checkin', handleCreateCheckIn)
 app.post('/api/checkins', handleCreateCheckIn)
 
-// Get alerts
+// Get alerts (optional ?userId=, ?status=, ?familyGroupId=)
 app.get('/api/alerts', async (req, res) => {
   try {
-    const { userId, status } = req.query
+    const { userId, status, familyGroupId } = req.query
     const alerts = await prisma.alert.findMany({
       where: {
         ...(userId ? { userId: String(userId) } : {}),
         ...(status ? { status } : {}),
+        ...(familyGroupId ? { user: { familyGroupId: String(familyGroupId) } } : {}),
       },
       orderBy: { timestamp: 'desc' },
       include: {
@@ -423,6 +425,14 @@ app.post('/api/alerts', async (req, res) => {
         user: true,
       },
     })
+
+    // Emit Socket.io event 'alert:new' to senior's familyGroupId room
+    if (user.familyGroupId) {
+      io.to(user.familyGroupId).emit('alert:new', alert)
+    } else {
+      io.emit('alert:new', alert)
+    }
+
     res.status(201).json({ success: true, data: alert })
   } catch (error) {
     console.error('Error creating alert:', error)
@@ -445,7 +455,24 @@ app.patch('/api/alerts/:id', async (req, res) => {
     const updatedAlert = await prisma.alert.update({
       where: { id },
       data: { status },
+      include: {
+        user: true,
+      },
     })
+
+    // Emit Socket.io events when alert is updated/resolved
+    if (updatedAlert.user?.familyGroupId) {
+      io.to(updatedAlert.user.familyGroupId).emit('alert:updated', updatedAlert)
+      if (status === 'RESOLVED') {
+        io.to(updatedAlert.user.familyGroupId).emit('alert:resolved', updatedAlert)
+      }
+    } else {
+      io.emit('alert:updated', updatedAlert)
+      if (status === 'RESOLVED') {
+        io.emit('alert:resolved', updatedAlert)
+      }
+    }
+
     res.json({ success: true, data: updatedAlert })
   } catch (error) {
     if (error.code === 'P2025') {
@@ -459,13 +486,132 @@ app.patch('/api/alerts/:id', async (req, res) => {
   }
 })
 
-const isMain = process.argv[1] && (process.argv[1].endsWith('src/index.js') || process.argv[1].endsWith('src\\index.js'))
+// ==============================================================
+// CRON JOB: Periodically check senior check-in status (node-cron)
+// Threshold defaults to 2 minutes for demo as specified in requirements
+// ==============================================================
+export const DEFAULT_CHECKIN_THRESHOLD_MS =
+  parseInt(process.env.CHECKIN_THRESHOLD_MS, 10) || 2 * 60 * 1000
+
+export async function checkSeniorCheckIns(thresholdMs = DEFAULT_CHECKIN_THRESHOLD_MS) {
+  const now = new Date()
+  const createdAlerts = []
+
+  // Fetch all seniors with their latest check-in and active NO_CHECKIN alerts
+  const seniors = await prisma.user.findMany({
+    where: { role: 'SENIOR' },
+    include: {
+      checkIns: {
+        orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
+        take: 1,
+      },
+      alerts: {
+        where: {
+          type: 'NO_CHECKIN',
+          status: 'ACTIVE',
+        },
+      },
+    },
+  })
+
+  for (const senior of seniors) {
+    const latestCheckIn = senior.checkIns[0] || null
+    const referenceTime = latestCheckIn
+      ? new Date(latestCheckIn.timestamp).getTime()
+      : new Date(senior.createdAt).getTime()
+
+    const gap = now.getTime() - referenceTime
+
+    if (gap > thresholdMs) {
+      // 1. Skip if senior already has an active NO_CHECKIN alert (prevent duplicate spam)
+      if (senior.alerts.length > 0) {
+        continue
+      }
+
+      // 2. Skip if a NO_CHECKIN alert was recently created within thresholdMs
+      const recentAlert = await prisma.alert.findFirst({
+        where: {
+          userId: senior.id,
+          type: 'NO_CHECKIN',
+          timestamp: {
+            gt: new Date(now.getTime() - thresholdMs),
+          },
+        },
+        orderBy: { timestamp: 'desc' },
+      })
+      if (recentAlert) {
+        continue
+      }
+
+      // 3. Create Alert row (type NO_CHECKIN, status ACTIVE)
+      const alert = await prisma.alert.create({
+        data: {
+          userId: senior.id,
+          type: 'NO_CHECKIN',
+          status: 'ACTIVE',
+          timestamp: now,
+        },
+        include: {
+          user: true,
+        },
+      })
+
+      createdAlerts.push(alert)
+
+      // 4. Emit 'alert:new' via Socket.io to senior's familyGroupId room
+      if (senior.familyGroupId) {
+        io.to(senior.familyGroupId).emit('alert:new', alert)
+      } else {
+        io.emit('alert:new', alert)
+      }
+    }
+  }
+
+  return createdAlerts
+}
+
+let cronTask = null
+
+export function startCheckInCron(
+  cronExpression = '* * * * *',
+  thresholdMs = DEFAULT_CHECKIN_THRESHOLD_MS
+) {
+  if (cronTask) {
+    return cronTask
+  }
+  cronTask = cron.schedule(cronExpression, async () => {
+    try {
+      await checkSeniorCheckIns(thresholdMs)
+    } catch (err) {
+      console.error('Error executing checkSeniorCheckIns cron job:', err)
+    }
+  })
+  return cronTask
+}
+
+export function stopCheckInCron() {
+  if (cronTask) {
+    cronTask.stop()
+    cronTask = null
+  }
+}
+
+const isMain =
+  process.argv[1] &&
+  (process.argv[1].endsWith('src/index.js') || process.argv[1].endsWith('src\\index.js'))
 
 if (isMain) {
   server.listen(PORT, () => {
     console.log(`CareCircle backend server running on http://localhost:${PORT}`)
   })
+  startCheckInCron()
 }
 
-export { app, server, io, prisma }
+export {
+  app,
+  server,
+  io,
+  prisma,
+  cronTask,
+}
 export default app

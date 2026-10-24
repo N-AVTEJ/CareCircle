@@ -1,6 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { app, server, io, prisma } from '../src/index.js'
+import {
+  app,
+  server,
+  io,
+  prisma,
+  checkSeniorCheckIns,
+  startCheckInCron,
+  stopCheckInCron,
+  DEFAULT_CHECKIN_THRESHOLD_MS,
+} from '../src/index.js'
 import { io as Client } from 'socket.io-client'
 
 let baseUrl
@@ -16,6 +25,7 @@ test.before(async () => {
 })
 
 test.after(async () => {
+  stopCheckInCron()
   io.close()
   if (server) {
     server.closeAllConnections?.()
@@ -712,6 +722,160 @@ test('GET /api/dashboard/:familyGroupId computes status accurately for multiple 
     await prisma.user.deleteMany({ where: { id: { in: [senior1.id, senior2.id] } } })
   }
 })
+
+test('DEFAULT_CHECKIN_THRESHOLD_MS defaults to 2 minutes for demo', () => {
+  assert.equal(
+    DEFAULT_CHECKIN_THRESHOLD_MS,
+    2 * 60 * 1000,
+    'Demo threshold must be exactly 2 minutes (120000ms)'
+  )
+})
+
+test('checkSeniorCheckIns does not create alert when senior checked in within threshold', async () => {
+  const testGroupId = `fresh_group_${Date.now()}`
+  const senior = await prisma.user.create({
+    data: {
+      name: 'Fresh Senior',
+      role: 'SENIOR',
+      phone: '+1-555-2001',
+      familyGroupId: testGroupId,
+    },
+  })
+  // Check-in from 30 seconds ago (well within 2 min threshold)
+  await prisma.checkIn.create({
+    data: {
+      userId: senior.id,
+      type: 'MEAL',
+      status: 'Ate healthy breakfast',
+      timestamp: new Date(Date.now() - 30 * 1000),
+    },
+  })
+
+  try {
+    const createdAlerts = await checkSeniorCheckIns(2 * 60 * 1000)
+    const alertForSenior = createdAlerts.find((a) => a.userId === senior.id)
+    assert.equal(alertForSenior, undefined, 'Fresh senior should not have an alert created')
+
+    const dbAlerts = await prisma.alert.findMany({ where: { userId: senior.id } })
+    assert.equal(dbAlerts.length, 0, 'No alert row should exist in DB for fresh senior')
+  } finally {
+    await prisma.checkIn.deleteMany({ where: { userId: senior.id } })
+    await prisma.user.deleteMany({ where: { id: senior.id } })
+  }
+})
+
+test('checkSeniorCheckIns creates NO_CHECKIN Alert and emits alert:new via Socket.io when gap > 2 min', async () => {
+  const testGroupId = `overdue_group_${Date.now()}`
+  const senior = await prisma.user.create({
+    data: {
+      name: 'Overdue Senior',
+      role: 'SENIOR',
+      phone: '+1-555-2002',
+      familyGroupId: testGroupId,
+    },
+  })
+  // Check-in from 3 minutes ago (gap > 2 min threshold)
+  await prisma.checkIn.create({
+    data: {
+      userId: senior.id,
+      type: 'PILLS',
+      status: 'Took pills 3 minutes ago',
+      timestamp: new Date(Date.now() - 3 * 60 * 1000),
+    },
+  })
+
+  // Connect socket.io client to listen for 'alert:new' in that room
+  const socketClient = Client(baseUrl, {
+    query: { familyGroupId: testGroupId },
+    transports: ['websocket'],
+  })
+
+  try {
+    await new Promise((resolve) => socketClient.on('connect', resolve))
+
+    const alertPromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('Timed out waiting for alert:new Socket.io event')),
+        5000
+      )
+      socketClient.on('alert:new', (data) => {
+        clearTimeout(timeout)
+        resolve(data)
+      })
+    })
+
+    // Run checkSeniorCheckIns with 2 min threshold
+    const createdAlerts = await checkSeniorCheckIns(2 * 60 * 1000)
+    const createdAlert = createdAlerts.find((a) => a.userId === senior.id)
+
+    assert.ok(createdAlert, 'An alert must be created for the overdue senior')
+    assert.equal(createdAlert.type, 'NO_CHECKIN')
+    assert.equal(createdAlert.status, 'ACTIVE')
+    assert.equal(createdAlert.userId, senior.id)
+
+    // Verify row persisted in Prisma Alert table
+    const dbAlert = await prisma.alert.findUnique({
+      where: { id: createdAlert.id },
+      include: { user: true },
+    })
+    assert.ok(dbAlert, 'Alert must be saved in database')
+    assert.equal(dbAlert.type, 'NO_CHECKIN')
+    assert.equal(dbAlert.status, 'ACTIVE')
+    assert.equal(dbAlert.user.name, 'Overdue Senior')
+
+    // Verify Socket.io event was received
+    const emittedAlert = await alertPromise
+    assert.equal(emittedAlert.id, createdAlert.id)
+    assert.equal(emittedAlert.type, 'NO_CHECKIN')
+    assert.equal(emittedAlert.status, 'ACTIVE')
+
+    // Second checkSeniorCheckIns call must NOT duplicate the active alert
+    const secondPassAlerts = await checkSeniorCheckIns(2 * 60 * 1000)
+    const duplicate = secondPassAlerts.find((a) => a.userId === senior.id)
+    assert.equal(duplicate, undefined, 'Must not create duplicate active alert for same senior')
+
+    const allDbAlerts = await prisma.alert.findMany({ where: { userId: senior.id } })
+    assert.equal(allDbAlerts.length, 1, 'Exactly one alert row must exist in DB')
+
+    // Test PATCH /api/alerts/:id marks it RESOLVED and emits alert:resolved
+    const resolvePromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('Timed out waiting for alert:resolved Socket.io event')),
+        5000
+      )
+      socketClient.on('alert:resolved', (data) => {
+        clearTimeout(timeout)
+        resolve(data)
+      })
+    })
+
+    const patchRes = await fetch(`${baseUrl}/api/alerts/${createdAlert.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'RESOLVED' }),
+    })
+    assert.equal(patchRes.status, 200)
+    const patchJson = await patchRes.json()
+    assert.equal(patchJson.success, true)
+    assert.equal(patchJson.data.status, 'RESOLVED')
+
+    const resolvedEvent = await resolvePromise
+    assert.equal(resolvedEvent.id, createdAlert.id)
+    assert.equal(resolvedEvent.status, 'RESOLVED')
+  } finally {
+    socketClient.disconnect()
+    await prisma.alert.deleteMany({ where: { userId: senior.id } })
+    await prisma.checkIn.deleteMany({ where: { userId: senior.id } })
+    await prisma.user.deleteMany({ where: { id: senior.id } })
+  }
+})
+
+test('startCheckInCron schedules cron and stopCheckInCron cancels it', () => {
+  const task = startCheckInCron('* * * * *', 2 * 60 * 1000)
+  assert.ok(task, 'startCheckInCron must return scheduled task')
+  stopCheckInCron()
+})
+
 
 
 
