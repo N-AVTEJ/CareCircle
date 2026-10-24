@@ -16,7 +16,8 @@
     "verify:dashboard": "node test/verify-dashboard-tabs.js",
     "verify:alert": "node test/verify-alert-cron.js",
     "verify:sos": "node test/verify-sos-alert.js",
-    "verify:mobile": "node test/verify-mobile-and-mood.js"
+    "verify:mobile": "node test/verify-mobile-and-mood.js",
+    "verify:risk": "node test/verify-risk-score.js"
   },
   "prisma": {
     "seed": "node prisma/seed.js"
